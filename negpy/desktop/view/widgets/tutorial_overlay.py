@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt6.QtCore import QEvent, QObject, QRectF, Qt, pyqtSignal
@@ -42,11 +43,17 @@ class TutorialOverlay(QWidget):
     def __init__(self, window: "MainWindow") -> None:
         super().__init__(window)
         self._win = window
+        self._use_top_level_window = sys.platform == "win32"
+
+        if self._use_top_level_window:
+            self.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint)
+            self.setWindowModality(Qt.WindowModality.WindowModal)
+            self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
 
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setGeometry(window.rect())
+        self._sync_geometry()
         window.installEventFilter(self)
 
         self._steps: list[TutorialStep] = []
@@ -137,10 +144,12 @@ class TutorialOverlay(QWidget):
         self._steps = steps
         self._idx = 0
         self._expanded = {}
-        self.setGeometry(self._win.rect())
+        self._sync_geometry()
         self.show()
         self.raise_()
-        self.setFocus()
+        self.activateWindow()
+        self._popup.raise_()
+        self.setFocus(Qt.FocusReason.ActiveWindowFocusReason)
         self._goto(0)
 
     def dismiss(self) -> None:
@@ -248,6 +257,12 @@ class TutorialOverlay(QWidget):
                 section.toggle_button.setChecked(False)
         self._expanded = {}
 
+    def _sync_geometry(self) -> None:
+        if self._use_top_level_window:
+            self.setGeometry(self._win.geometry())
+        else:
+            self.setGeometry(self._win.rect())
+
     # ------------------------------------------------------------------
     # Qt overrides
     # ------------------------------------------------------------------
@@ -294,8 +309,13 @@ class TutorialOverlay(QWidget):
             super().keyPressEvent(a0)
 
     def eventFilter(self, a0: Optional[QObject], a1: Optional[QEvent]) -> bool:  # type: ignore[override]
-        if a0 is self._win and a1 is not None and a1.type() == QEvent.Type.Resize:
-            self.setGeometry(self._win.rect())
+        if a0 is self._win and a1 is not None and a1.type() in {
+            QEvent.Type.Move,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.WindowStateChange,
+        }:
+            self._sync_geometry()
             target: Optional[QWidget] = None
             if self._steps:
                 target = self._steps[self._idx].target(self._win)
