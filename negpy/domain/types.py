@@ -40,3 +40,6 @@ class AppConfig:
     override_toml_path: str = ""
     max_texture_size: int | None = None
     force_hq_preview: bool | None = None
+    # Canvas zoom (1.0 = 100%)
+    canvas_zoom_min: float = 0.25
+    canvas_zoom_max: float = 8.0

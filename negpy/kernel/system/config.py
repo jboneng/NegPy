@@ -32,6 +32,8 @@ APP_CONFIG = AppConfig(
     adobe_rgb_profile=get_resource_path("icc/AdobeCompat-v4.icc"),
     use_gpu=True,
     override_toml_path=os.path.join(BASE_USER_DIR, "override.toml"),
+    canvas_zoom_min=0.25,
+    canvas_zoom_max=8.0,
 )
 
 

@@ -1,20 +1,63 @@
-from typing import TYPE_CHECKING, Optional, Tuple, Any
+from typing import TYPE_CHECKING, Any, Optional, Tuple
+import math
 import sys
-from PyQt6.QtWidgets import QWidget, QStackedLayout, QMenu
-from PyQt6.QtGui import QPainter, QColor, QMouseEvent
-from PyQt6.QtCore import pyqtSignal, Qt, QPointF
+from PyQt6.QtWidgets import QStackedLayout, QMenu, QWidget, QPinchGesture, QGestureEvent
+from PyQt6.QtGui import QMouseEvent, QNativeGestureEvent, QPainter, QColor, QWheelEvent
+from PyQt6.QtCore import QEvent, pyqtSignal, Qt, QPointF
 from negpy.desktop.session import ToolMode, AppState
 from negpy.desktop.view.canvas.gpu_widget import GPUCanvasWidget
 from negpy.desktop.view.canvas.overlay import CanvasOverlay
 from negpy.desktop.view.canvas.pixel_readout import PixelReadoutOverlay
 from negpy.infrastructure.gpu.device import GPUDevice
 from negpy.infrastructure.gpu.resources import GPUTexture
+from negpy.kernel.system.config import APP_CONFIG
 from negpy.kernel.system.logging import get_logger
 
 if TYPE_CHECKING:
     from negpy.desktop.controller import AppController
 
 logger = get_logger(__name__)
+
+
+def clamp_canvas_zoom_level(zoom: float) -> float:
+    zmin, zmax = APP_CONFIG.canvas_zoom_min, APP_CONFIG.canvas_zoom_max
+    return max(zmin, min(zoom, zmax))
+
+
+# One "notch" (typical mouse wheel) ≈ 120/8°; matches prior fixed 1.1 / 0.9 per notch.
+WHEEL_ZOOM_NOTCH = 1.1
+# Trackpad: map pixel delta to notch-equivalents (tuned for ~smooth steps).
+_WHEEL_PIXELS_PER_NOTCH = 64.0
+# Do not apply more than this many notch-equivalents in a single event (huge flings).
+_WHEEL_MAX_NOTCHES = 4.0
+
+
+def wheel_notch_delta(event: QWheelEvent) -> float:
+    """
+    Signed "notch" count: >0 = zoom in, 0 = no vertical scroll intent.
+    angleDelta preferred; pixelDelta when y-angle is 0. OS ``inverted`` honored.
+    Result is negated at the end so a natural trackpad (scroll down) zooms in, matching photo viewers.
+    """
+    d = int(event.angleDelta().y())
+    if d != 0:
+        u = float(d) / 120.0
+    else:
+        pdy = int(event.pixelDelta().y())
+        if pdy == 0:
+            return 0.0
+        u = float(pdy) / _WHEEL_PIXELS_PER_NOTCH
+    if event.inverted():
+        u = -u
+    if u == 0.0:
+        return 0.0
+    c = _WHEEL_MAX_NOTCHES
+    u = max(-c, min(c, u))
+    return -u
+
+
+def apply_wheel_zoom_notches(zoom: float, notch_u: float) -> float:
+    """Clamped zoom after one wheel event (notch_u from ``wheel_notch_delta``)."""
+    return clamp_canvas_zoom_level(zoom * (WHEEL_ZOOM_NOTCH**notch_u))
 
 
 class ImageCanvas(QWidget):
@@ -80,6 +123,8 @@ class ImageCanvas(QWidget):
         self.cursor_position_changed.connect(lambda x, y: self.pixel_readout_overlay.setVisible(True))
         self.cursor_left_canvas.connect(lambda: self.pixel_readout_overlay.setVisible(False))
 
+        self.grabGesture(Qt.GestureType.PinchGesture)
+
     def set_tool_mode(self, mode: ToolMode) -> None:
         self.overlay.set_tool_mode(mode)
 
@@ -88,7 +133,7 @@ class ImageCanvas(QWidget):
 
     def set_zoom(self, zoom: float) -> None:
         """Sets zoom level directly (from toolbar)."""
-        self.zoom_level = max(0.25, min(zoom, 4.0))
+        self.zoom_level = clamp_canvas_zoom_level(zoom)
         if self.zoom_level <= 1.0:
             self.pan_offset = QPointF(0, 0)
         self._sync_transform()
@@ -111,8 +156,7 @@ class ImageCanvas(QWidget):
             return
         vw, vh = max(1, self.width()), max(1, self.height())
         zoom = min(vw / max(1, img_w), vh / max(1, img_h))
-        zoom = max(0.25, min(zoom, 4.0))
-        self.zoom_level = zoom
+        self.zoom_level = clamp_canvas_zoom_level(zoom)
         self.pan_offset = QPointF(0, 0)
         self._sync_transform()
 
@@ -166,31 +210,128 @@ class ImageCanvas(QWidget):
             return (float(px[0]) * scale, float(px[1]) * scale, float(px[2]) * scale)
         return None
 
-    def wheelEvent(self, event) -> None:
-        """Handles zooming anchored on the mouse cursor position."""
-        delta = event.angleDelta().y()
-        zoom_factor = 1.1 if delta > 0 else 0.9
+    @staticmethod
+    def _scale_from_native_zoom_value(v: float) -> float | None:
+        """Map QNativeGestureEvent (Zoom) ``value`` to a multiplicative scale step."""
+        v = float(v)
+        if not math.isfinite(v) or abs(v) < 1e-9:
+            return None
+        if abs(1.0 - v) < 0.15:  # ~0.85–1.15, treat as a direct factor
+            k = v
+        elif -0.5 < v < 0.5:  # small per-frame delta
+            k = 1.0 + v
+        else:
+            k = 1.0 + v
+        if not math.isfinite(k) or k < 0.1:
+            return None
+        return min(k, 4.0) if k > 1.0 else max(k, 0.25)  # single-event factor bounds
 
+    def _commit_anchored_zoom(self, new_zoom: float, anchor: QPointF) -> None:
+        """Applies a zoom level with pan adjusted so `anchor` stays under the same image point."""
         old_zoom = self.zoom_level
-        new_zoom = max(0.25, min(old_zoom * zoom_factor, 4.0))
-
+        if new_zoom == old_zoom:
+            return
         if new_zoom > 1.0 and old_zoom > 0:
-            # Cursor offset from widget center, in normalized units [-0.5, 0.5]
-            cursor = event.position()
-            dx = cursor.x() / max(1, self.width()) - 0.5
-            dy = cursor.y() / max(1, self.height()) - 0.5
-            # Adjust pan so the image point under cursor stays fixed
+            dx = anchor.x() / max(1, self.width()) - 0.5
+            dy = anchor.y() / max(1, self.height()) - 0.5
             k = new_zoom / old_zoom
             self.pan_offset = QPointF(
-                self.pan_offset.x() * k - dx * (k - 1),
-                self.pan_offset.y() * k - dy * (k - 1),
+                self.pan_offset.x() * k - dx * (k - 1.0),
+                self.pan_offset.y() * k - dy * (k - 1.0),
             )
-
         self.zoom_level = new_zoom
         if self.zoom_level <= 1.0:
             self.pan_offset = QPointF(0, 0)
-
         self._sync_transform()
+
+    def _apply_scale_at(self, scale_k: float, anchor: QPointF) -> bool:
+        """
+        Multiplies current zoom by ``scale_k`` (e.g. pinch), clamped. Returns True if the view changed.
+        """
+        if not math.isfinite(scale_k) or scale_k <= 0.0 or abs(scale_k - 1.0) < 1e-6:
+            return False
+        zmin = APP_CONFIG.canvas_zoom_min
+        zmax = APP_CONFIG.canvas_zoom_max
+        old = self.zoom_level
+        if (old >= zmax and scale_k > 1.0) or (old <= zmin and scale_k < 1.0):
+            return False
+        new = clamp_canvas_zoom_level(old * scale_k)
+        if new == old:
+            return False
+        self._commit_anchored_zoom(new, anchor)
+        return True
+
+    def event(self, e: QEvent) -> bool:
+        t = e.type()
+        if t == QEvent.Type.Gesture and isinstance(e, QGestureEvent):
+            if self._try_pinch_gesture(e):
+                return True
+        if t == QEvent.Type.NativeGesture and isinstance(e, QNativeGestureEvent):
+            if self._try_native_pinch_zoom(e):
+                return True
+        return super().event(e)
+
+    def _try_pinch_gesture(self, ev: QGestureEvent) -> bool:
+        g = ev.gesture(Qt.GestureType.PinchGesture)
+        if g is None or not isinstance(g, QPinchGesture):
+            return False
+        st = g.state()
+        if st in (Qt.GestureState.GestureFinished, Qt.GestureState.GestureCanceled):
+            ev.setAccepted(g, True)
+            return True
+        if st == Qt.GestureState.GestureStarted:
+            ev.setAccepted(g, True)
+            return True
+        if st != Qt.GestureState.GestureUpdated:
+            return False
+        k = float(g.lastScaleFactor())
+        if not math.isfinite(k) or k <= 0.0 or abs(k - 1.0) < 1e-6:
+            ev.setAccepted(g, True)
+            return True
+        anchor = g.centerPoint()
+        w = ev.widget()
+        if w is not None and w is not self:
+            anchor = w.mapTo(self, anchor)
+        if self._apply_scale_at(k, anchor):
+            ev.setAccepted(g, True)
+            return True
+        ev.setAccepted(g, True)
+        return True
+
+    def _try_native_pinch_zoom(self, n: QNativeGestureEvent) -> bool:
+        if n.gestureType() != Qt.NativeGestureType.ZoomNativeGesture:
+            return False
+        if n.isBeginEvent() or n.isEndEvent():
+            n.accept()
+            return True
+        n.accept()
+        if not n.isUpdateEvent():
+            return True
+        k = self._scale_from_native_zoom_value(n.value())
+        if k is not None and abs(k - 1.0) >= 1e-6:
+            self._apply_scale_at(k, n.position())
+        return True
+
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Handles zooming anchored on the mouse cursor position."""
+        u = wheel_notch_delta(event)
+        if u == 0.0:
+            event.ignore()
+            return
+
+        zmin = APP_CONFIG.canvas_zoom_min
+        zmax = APP_CONFIG.canvas_zoom_max
+        old_zoom = self.zoom_level
+        if (old_zoom >= zmax and u > 0.0) or (old_zoom <= zmin and u < 0.0):
+            event.accept()
+            return
+
+        new_zoom = apply_wheel_zoom_notches(old_zoom, u)
+        if new_zoom == old_zoom:
+            event.accept()
+            return
+
+        self._commit_anchored_zoom(new_zoom, event.position())
         event.accept()
 
     def mousePressEvent(self, event) -> None:
