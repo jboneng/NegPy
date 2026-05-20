@@ -307,6 +307,8 @@ class AppController(QObject):
         self._render_cleanup_requested.emit()
 
         self.state.preview_raw = None
+        self.state.preview_ir = None
+        self.state.has_ir = False
         self.state.original_res = (0, 0)
 
         self.preview_load_requested.emit(
@@ -318,12 +320,15 @@ class AppController(QObject):
             )
         )
 
-    def _on_preview_loaded(self, file_path: str, raw: Any, dims: Any, source_cs: str) -> None:
+    def _on_preview_loaded(self, file_path: str, raw: Any, dims: Any, source_cs: str, ir_preview: Any) -> None:
         self.state.preview_raw = raw
+        self.state.preview_ir = ir_preview
+        self.state.has_ir = ir_preview is not None
         self.state.original_res = dims
         self.state.current_file_path = file_path
         self.state.source_cs = source_cs
         self.preview_loaded.emit()
+        self.config_updated.emit()
         self.request_render()
 
     def toggle_hq_preview(self) -> None:
@@ -710,6 +715,7 @@ class AppController(QObject):
             color_space=self.state.workspace_color_space,
             gpu_enabled=self.state.gpu_enabled,
             readback_metrics=readback_metrics,
+            ir_buffer=self.state.preview_ir,
         )
 
         if self._is_rendering:
