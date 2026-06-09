@@ -2,10 +2,9 @@
 
 ## 0.24.0
 
-- Fix: exporting a file whose source has a large embedded thumbnail or maker-note no longer silently drops all metadata — oversized EXIF is now trimmed to fit the JPEG limit instead of failing.
 - Added **Before/After**: toggle button (and `\` shortcut) to flash the un-graded auto conversion of the current frame, so you can see what your edits changed at a glance.
-- Background pre-loading now respects each file's own Linear RAW setting, so neighbouring photos stay instant even when their settings differ.
 - **Faster preview loading**: opening and navigating between photos is now near-instant. Previews use a quick decode for display (full quality is still used on export), recently-viewed images are kept in memory, and an embedded thumbnail shows immediately while the full preview loads. Next/previous files are pre-loaded in the background so flipping through a roll feels instant. @reederphill (#230)
+- Fix: exporting a file whose source has a large embedded thumbnail or maker-note no longer silently drops all metadata — oversized EXIF is now trimmed to fit the JPEG limit instead of failing.
 
 ## 0.23.2
 
