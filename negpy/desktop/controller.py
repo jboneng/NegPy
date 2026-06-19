@@ -24,7 +24,12 @@ from negpy.desktop.workers.render import (
     ThumbnailWorker,
 )
 from negpy.desktop.workers.scan_worker import ScanRequest, ScanWorker
-from negpy.domain.models import WorkspaceConfig
+from negpy.domain.models import (
+    ExportPreset,
+    ExportPresetOutputMode,
+    WorkspaceConfig,
+    preset_from_export_config,
+)
 from negpy.features.exposure.logic import (
     calculate_wb_shifts,
     calculate_wb_shifts_from_log,
@@ -1008,6 +1013,51 @@ class AppController(QObject):
             self.compare_changed.emit(True)
             self.request_render(readback_metrics=False, config_override=self._baseline_compare_config())
 
+    def _enabled_presets(self) -> List[ExportPreset]:
+        return [p for p in self.state.export_presets if p.enabled]
+
+    def _validate_preset_paths(self, presets: List[ExportPreset]) -> bool:
+        """Returns True if all absolute-path presets have a valid directory configured."""
+        from PyQt6.QtWidgets import QFileDialog
+
+        for p in presets:
+            if p.output_mode == ExportPresetOutputMode.ABSOLUTE and not p.output_path.strip():
+                new_path = QFileDialog.getExistingDirectory(None, f"Select output folder for preset '{p.name}'", os.path.expanduser("~"))
+                if not new_path:
+                    return False
+                p.output_path = new_path
+                self.session.save_export_presets()
+        return True
+
+    def _tasks_for_file(
+        self,
+        file_info: dict,
+        params: WorkspaceConfig,
+        presets: List[ExportPreset],
+        bounds_override=None,
+        source_exif=None,
+        metadata_config=None,
+    ) -> List[ExportTask]:
+        tasks = []
+        for preset in presets:
+            from copy import copy
+
+            p = copy(preset)
+            p.icc_input_path = self.state.icc_input_path
+            tasks.append(
+                ExportTask(
+                    file_info=file_info,
+                    params=params,
+                    export_settings=p,
+                    gpu_enabled=self.state.gpu_enabled,
+                    bounds_override=bounds_override,
+                    source_exif=source_exif,
+                    metadata_config=metadata_config,
+                    working_color_space=self.state.workspace_color_space,
+                )
+            )
+        return tasks
+
     def _ensure_valid_export_path(self) -> Optional[str]:
         """
         Checks if the current export path is valid. If not, prompts the user.
@@ -1028,9 +1078,7 @@ class AppController(QObject):
         return export_path
 
     def request_export(self) -> None:
-        """
-        Initiates high-resolution export for the current file.
-        """
+        """Exports the current file using the settings currently shown in the Export panel."""
         if not self.state.current_file_path:
             return
 
@@ -1044,7 +1092,6 @@ class AppController(QObject):
             icc_input_path=self.state.icc_input_path,
             icc_output_path=self.state.icc_output_path,
         )
-
         source_exif = self.state.source_exif.get(self.state.current_file_hash or "")
 
         self._run_export_tasks(
@@ -1056,7 +1103,7 @@ class AppController(QObject):
                         "hash": self.state.current_file_hash,
                     },
                     params=self.state.config,
-                    export_settings=export_conf,
+                    export_settings=preset_from_export_config(export_conf),
                     gpu_enabled=self.state.gpu_enabled,
                     source_exif=source_exif,
                     metadata_config=self.state.config.metadata,
@@ -1066,9 +1113,7 @@ class AppController(QObject):
         )
 
     def request_batch_export(self, override_settings: bool = False) -> None:
-        """
-        Initiates batch export, optionally applying current export settings to all files.
-        """
+        """Batch-exports all visible files using current settings, optionally applied to all."""
         export_path = self._ensure_valid_export_path()
         if not export_path:
             return
@@ -1098,7 +1143,6 @@ class AppController(QObject):
                 with self.state.metrics_lock:
                     bounds_override = self.state.last_metrics.get("log_bounds")
 
-            # Metadata: if sync enabled, use current config for all files
             source_exif = self.state.source_exif.get(f["hash"])
             metadata_config = self.state.config.metadata if sync_metadata else params.metadata
 
@@ -1106,12 +1150,80 @@ class AppController(QObject):
                 ExportTask(
                     file_info=f,
                     params=params,
-                    export_settings=final_export,
+                    export_settings=preset_from_export_config(final_export),
                     gpu_enabled=self.state.gpu_enabled,
                     bounds_override=bounds_override,
                     source_exif=source_exif,
                     metadata_config=metadata_config,
                     working_color_space=self.state.workspace_color_space,
+                )
+            )
+
+        if tasks:
+            self._run_export_tasks(tasks)
+
+    def request_preset_export(self) -> None:
+        """Initiates high-resolution export for the current file using enabled presets."""
+        if not self.state.current_file_path:
+            return
+
+        presets = self._enabled_presets()
+        if not presets:
+            QMessageBox.information(None, "No presets enabled", "Enable at least one export preset in the Export panel.")
+            return
+
+        if not self._validate_preset_paths(presets):
+            return
+
+        source_exif = self.state.source_exif.get(self.state.current_file_hash or "")
+        file_info = {
+            "name": os.path.basename(self.state.current_file_path),
+            "path": self.state.current_file_path,
+            "hash": self.state.current_file_hash,
+        }
+        tasks = self._tasks_for_file(
+            file_info,
+            self.state.config,
+            presets,
+            source_exif=source_exif,
+            metadata_config=self.state.config.metadata,
+        )
+        if tasks:
+            self._run_export_tasks(tasks)
+
+    def request_preset_batch_export(self) -> None:
+        """Initiates batch export for all visible files using enabled presets."""
+        presets = self._enabled_presets()
+        if not presets:
+            QMessageBox.information(None, "No presets enabled", "Enable at least one export preset in the Export panel.")
+            return
+
+        if not self._validate_preset_paths(presets):
+            return
+
+        sync_metadata = self.state.config.metadata.sync_to_batch
+        visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+
+        tasks = []
+        for f in visible_files:
+            params = self.session.repo.load_file_settings(f["hash"]) or self.state.config
+
+            bounds_override = None
+            if f["hash"] == self.state.current_file_hash:
+                with self.state.metrics_lock:
+                    bounds_override = self.state.last_metrics.get("log_bounds")
+
+            source_exif = self.state.source_exif.get(f["hash"])
+            metadata_config = self.state.config.metadata if sync_metadata else params.metadata
+
+            tasks.extend(
+                self._tasks_for_file(
+                    f,
+                    params,
+                    presets,
+                    bounds_override=bounds_override,
+                    source_exif=source_exif,
+                    metadata_config=metadata_config,
                 )
             )
 
@@ -1145,6 +1257,7 @@ class AppController(QObject):
                 )
             )
 
+        cs = self.state.config.export
         self._export_start_time = time.time()
         QMetaObject.invokeMethod(
             self.export_worker,
@@ -1152,6 +1265,10 @@ class AppController(QObject):
             Qt.ConnectionType.QueuedConnection,
             Q_ARG(list, tasks),
             Q_ARG(str, out_dir),
+            Q_ARG(int, cs.contact_sheet_cell_px),
+            Q_ARG(int, cs.contact_sheet_gap),
+            Q_ARG(int, cs.contact_sheet_margin),
+            Q_ARG(int, cs.contact_sheet_max_tiles),
         )
 
     def _run_export_tasks(self, tasks: List[ExportTask]) -> None:

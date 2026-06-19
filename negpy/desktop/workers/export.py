@@ -1,15 +1,15 @@
 from dataclasses import dataclass
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Union
 import os
 import tempfile
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
-from negpy.domain.models import WorkspaceConfig, ExportConfig, ExportFormat
+from negpy.domain.models import WorkspaceConfig, ExportConfig, ExportFormat, ExportPreset, ExportPresetOutputMode
 from negpy.features.metadata.writer import embed_metadata
 from negpy.features.metadata.models import MetadataConfig
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.services.rendering.image_processor import ImageProcessor
 from negpy.services.export.templating import render_export_filename
-from negpy.services.export.contact_sheet import ContactSheetService, CELL_PX
+from negpy.services.export.contact_sheet import ContactSheetService
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class ExportTask:
 
     file_info: dict
     params: WorkspaceConfig
-    export_settings: ExportConfig
+    export_settings: Union[ExportConfig, ExportPreset]
     gpu_enabled: bool = True
     bounds_override: Optional[Any] = None
     source_exif: Optional[dict] = None
@@ -65,12 +65,19 @@ class ExportWorker(QObject):
                     if task.metadata_config is not None:
                         bits = embed_metadata(bits, task.metadata_config, task.source_exif)
 
-                    out_dir = (
-                        os.path.dirname(task.file_info["path"]) if task.export_settings.same_as_source else task.export_settings.export_path
-                    )
+                    source_dir = os.path.dirname(task.file_info["path"])
+                    output_mode = task.export_settings.output_mode
+                    if output_mode == ExportPresetOutputMode.SUBFOLDER_OF_SOURCE:
+                        subfolder = task.export_settings.output_subfolder or ""
+                        out_dir = os.path.join(source_dir, subfolder) if subfolder else source_dir
+                    elif output_mode == ExportPresetOutputMode.ABSOLUTE:
+                        out_dir = task.export_settings.output_path or source_dir
+                    else:
+                        out_dir = source_dir
                     os.makedirs(out_dir, exist_ok=True)
 
-                    ext = "jpg" if task.export_settings.export_fmt == ExportFormat.JPEG else "tiff"
+                    _EXT = {ExportFormat.JPEG: "jpg", ExportFormat.TIFF: "tiff", ExportFormat.PNG: "png"}
+                    ext = _EXT.get(task.export_settings.export_fmt, "jpg")
 
                     filename = render_export_filename(
                         task.file_info["path"], task.export_settings, border_size=task.params.finish.border_size
@@ -102,8 +109,8 @@ class ExportWorker(QObject):
         except Exception as e:
             self.error.emit(str(e))
 
-    @pyqtSlot(list, str)
-    def run_contact_sheet(self, tasks: List[ExportTask], out_dir: str) -> None:
+    @pyqtSlot(list, str, int, int, int, int)
+    def run_contact_sheet(self, tasks: List[ExportTask], out_dir: str, cell_px: int, gap: int, margin: int, max_tiles: int) -> None:
         """Renders each task small and composites darkroom contact sheet(s) on black."""
         total = len(tasks)
         try:
@@ -116,7 +123,7 @@ class ExportWorker(QObject):
                     task.file_info["path"],
                     task.params,
                     task.file_info["hash"],
-                    target_long_px=CELL_PX * 2,
+                    target_long_px=cell_px * 2,
                     prefer_gpu=task.gpu_enabled,
                     working_color_space=task.working_color_space,
                 )
@@ -124,7 +131,7 @@ class ExportWorker(QObject):
                     tiles.append(tile)
                 self._processor.cleanup()
 
-            sheets = ContactSheetService.build_sheets(tiles)
+            sheets = ContactSheetService.build_sheets(tiles, max_tiles=max_tiles, cell_px=cell_px, gap=gap, margin=margin)
             os.makedirs(out_dir, exist_ok=True)
 
             for idx, sheet in enumerate(sheets):

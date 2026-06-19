@@ -1,4 +1,5 @@
 import os
+import uuid
 
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional
@@ -49,6 +50,13 @@ class AspectRatio(StrEnum):
 class ExportFormat(StrEnum):
     JPEG = "JPEG"
     TIFF = "TIFF"
+    PNG = "PNG"
+
+
+class ExportPresetOutputMode(StrEnum):
+    SUBFOLDER_OF_SOURCE = "subfolder_of_source"
+    SAME_AS_SOURCE = "same_as_source"
+    ABSOLUTE = "absolute"
 
 
 class ExportResolutionMode(StrEnum):
@@ -95,6 +103,101 @@ class ExportConfig:
     same_as_source: bool = False
     icc_input_path: Optional[str] = None
     icc_output_path: Optional[str] = None
+
+    contact_sheet_cell_px: int = 600
+    contact_sheet_gap: int = 16
+    contact_sheet_margin: int = 32
+    contact_sheet_max_tiles: int = 38
+
+
+@dataclass
+class ExportPreset:
+    """
+    A single export preset defining format, sizing, destination, and color settings.
+    Field names for sizing/color match ExportConfig so PrintService can accept either.
+    """
+
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = "Untitled Preset"
+    enabled: bool = True
+
+    # Format
+    export_fmt: str = ExportFormat.JPEG
+    jpeg_quality: int = 90
+
+    # Sizing (same field names as ExportConfig for PrintService compatibility)
+    export_resolution_mode: str = ExportResolutionMode.ORIGINAL.value
+    paper_aspect_ratio: str = AspectRatio.ORIGINAL
+    export_print_size: float = 30.0
+    export_dpi: int = 300
+    export_target_long_edge_px: int = 2000
+
+    # Output destination
+    output_mode: str = ExportPresetOutputMode.SAME_AS_SOURCE
+    output_subfolder: str = ""
+    output_path: str = ""
+    overwrite: bool = True
+    filename_pattern: str = "{{ original_name }}"
+
+    # Color
+    export_color_space: str = ColorSpace.ADOBE_RGB.value
+    icc_input_path: Optional[str] = None
+    icc_output_path: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "enabled": self.enabled,
+            "export_fmt": self.export_fmt,
+            "jpeg_quality": self.jpeg_quality,
+            "export_resolution_mode": self.export_resolution_mode,
+            "paper_aspect_ratio": self.paper_aspect_ratio,
+            "export_print_size": self.export_print_size,
+            "export_dpi": self.export_dpi,
+            "export_target_long_edge_px": self.export_target_long_edge_px,
+            "output_mode": self.output_mode,
+            "output_subfolder": self.output_subfolder,
+            "output_path": self.output_path,
+            "overwrite": self.overwrite,
+            "filename_pattern": self.filename_pattern,
+            "export_color_space": self.export_color_space,
+            "icc_input_path": self.icc_input_path,
+            "icc_output_path": self.icc_output_path,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ExportPreset":
+        known = cls.__dataclass_fields__.keys()
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+def preset_from_export_config(conf: ExportConfig, name: str = "Current settings") -> ExportPreset:
+    """Builds an ephemeral preset from the current export settings so the export
+    pipeline (which is preset-driven) can run a one-off 'export as currently seen'."""
+    if conf.same_as_source:
+        output_mode = ExportPresetOutputMode.SAME_AS_SOURCE
+        output_path = ""
+    else:
+        output_mode = ExportPresetOutputMode.ABSOLUTE
+        output_path = conf.export_path
+    return ExportPreset(
+        name=name,
+        enabled=True,
+        export_fmt=conf.export_fmt,
+        export_resolution_mode=conf.export_resolution_mode,
+        paper_aspect_ratio=conf.paper_aspect_ratio,
+        export_print_size=conf.export_print_size,
+        export_dpi=conf.export_dpi,
+        export_target_long_edge_px=conf.export_target_long_edge_px,
+        output_mode=output_mode,
+        output_path=output_path,
+        overwrite=conf.overwrite,
+        filename_pattern=conf.filename_pattern,
+        export_color_space=conf.export_color_space,
+        icc_input_path=conf.icc_input_path,
+        icc_output_path=conf.icc_output_path,
+    )
 
 
 @dataclass(frozen=True)
