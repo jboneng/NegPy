@@ -182,6 +182,7 @@ class LogisticSigmoid:
         highlight_cmy: tuple[float, float, float] = (0.0, 0.0, 0.0),
         flare: float = 0.0,
         surround_gamma: float = 1.0,
+        nu: Optional[float] = None,
     ):
         from negpy.features.exposure.models import EXPOSURE_CONSTANTS
 
@@ -196,7 +197,7 @@ class LogisticSigmoid:
         self.d_max = EXPOSURE_CONSTANTS["d_max"]
         self.shoulder_beta = EXPOSURE_CONSTANTS["dmax_shoulder"]
         self.d_min = d_min
-        self.nu = float(EXPOSURE_CONSTANTS["paper_toe_nu"])
+        self.nu = float(EXPOSURE_CONSTANTS["paper_toe_nu"]) if nu is None else float(nu)
         self.d_onset = EXPOSURE_CONSTANTS["toe_onset_density"]
         self.toe = toe * ts
         self.toe_width = toe_width
@@ -263,9 +264,15 @@ def apply_characteristic_curve(
     flare: float = 0.0,
     surround_gamma: float = 1.0,
     mode: int = 0,
+    asymptote: Optional[float] = None,
+    nu: Optional[float] = None,
 ) -> ImageBuffer:
     """
     Applies a film/paper characteristic curve (Sigmoid) per channel in Log-Density space.
+
+    ``asymptote`` and ``nu`` default to the calibrated paper values; the flat
+    (digital-intermediate) path overrides them with a compressed asymptote and
+    nu = 1 to produce a low-contrast, gently rolled-off master.
     """
     from negpy.features.exposure.models import EXPOSURE_CONSTANTS
 
@@ -275,6 +282,9 @@ def apply_characteristic_curve(
     offsets = np.ascontiguousarray(np.array(cmy_offsets, dtype=np.float32))
     s_cmy = np.ascontiguousarray(np.array(shadow_cmy, dtype=np.float32))
     h_cmy = np.ascontiguousarray(np.array(highlight_cmy, dtype=np.float32))
+
+    asym = float(EXPOSURE_CONSTANTS["curve_asymptote"]) if asymptote is None else float(asymptote)
+    nu_val = float(EXPOSURE_CONSTANTS["paper_toe_nu"]) if nu is None else float(nu)
 
     res = _apply_photometric_fused_kernel(
         np.ascontiguousarray(img.astype(np.float32)),
@@ -290,15 +300,37 @@ def apply_characteristic_curve(
         d_max=float(EXPOSURE_CONSTANTS["d_max"]),
         d_min=float(d_min),
         d_onset=float(EXPOSURE_CONSTANTS["toe_onset_density"]),
-        asymptote=float(EXPOSURE_CONSTANTS["curve_asymptote"]),
+        asymptote=asym,
         shoulder_beta=float(EXPOSURE_CONSTANTS["dmax_shoulder"]),
-        nu=float(EXPOSURE_CONSTANTS["paper_toe_nu"]),
+        nu=nu_val,
         flare=float(flare),
         surround_gamma=float(surround_gamma),
         mode=mode,
     )
 
     return ensure_image(res)
+
+
+def flat_curve_params(d_min: float = 0.0) -> Tuple[float, float, float]:
+    """
+    Fixed (slope, pivot, asymptote) for the flat digital-intermediate master.
+
+    Uses a low, scene-independent slope and a compressed asymptote so the print
+    is low-contrast with gentle roll-off and ample headroom (no channel clipping).
+    The pivot is solved so the assumed midtone anchor lands at a neutral mid-grey
+    density — no per-frame metering — so an evenly-exposed roll renders identically.
+    """
+    from negpy.features.exposure.models import EXPOSURE_CONSTANTS
+
+    c = EXPOSURE_CONSTANTS
+    slope = float(c["flat_slope"])
+    asym = float(c["flat_asymptote"])
+    ref = float(c["assumed_anchor"])
+    target = float(c["flat_anchor_target"]) * asym
+    s = (target - d_min) / (asym - d_min)
+    s = min(max(s, 1e-4), 1.0 - 1e-4)
+    pivot = ref - float(np.log(s / (1.0 - s))) / slope
+    return slope, pivot, asym
 
 
 def sigmoid_span(nu: float) -> float:

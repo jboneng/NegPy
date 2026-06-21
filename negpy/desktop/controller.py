@@ -25,9 +25,12 @@ from negpy.desktop.workers.render import (
 )
 from negpy.desktop.workers.scan_worker import ScanRequest, ScanWorker
 from negpy.domain.models import (
+    ExportFormat,
     ExportPreset,
     ExportPresetOutputMode,
     WorkspaceConfig,
+    flat_export_config,
+    flat_master_config,
     preset_from_export_config,
 )
 from negpy.features.exposure.logic import (
@@ -97,6 +100,8 @@ class AppController(QObject):
     config_updated = pyqtSignal()
     monitor_profile_changed = pyqtSignal()
     compare_changed = pyqtSignal(bool)
+    flat_output_changed = pyqtSignal(bool)
+    flat_peek_changed = pyqtSignal(bool)
     zoom_requested = pyqtSignal(float)
     zoom_changed = pyqtSignal(float)
     _render_cleanup_requested = pyqtSignal()
@@ -1073,6 +1078,11 @@ class AppController(QObject):
             self.state.compare_mode = False
             self.compare_changed.emit(False)
 
+        # Likewise, any direct render exits the flat preview-peek.
+        if config_override is None and self.state.flat_peek:
+            self.state.flat_peek = False
+            self.flat_peek_changed.emit(False)
+
         if self.state.preview_raw is None:
             return
 
@@ -1128,6 +1138,54 @@ class AppController(QObject):
             self.state.compare_mode = True
             self.compare_changed.emit(True)
             self.request_render(readback_metrics=False, config_override=self._baseline_compare_config())
+
+    # --- Flat ("for editing elsewhere") master output -----------------------
+
+    def set_flat_output(self, enabled: bool) -> None:
+        """Toggle the flat digital-intermediate output intent (export + peek)."""
+        if self.state.flat_output == enabled:
+            return
+        self.state.flat_output = enabled
+        self.session.save_flat_output_prefs()
+        self.flat_output_changed.emit(enabled)
+        # If a peek is active and flat output was turned off, drop back to the edit.
+        if not enabled and self.state.flat_peek:
+            self.toggle_flat_peek(force=False)
+
+    def _flat_export_format(self) -> str:
+        return ExportFormat.DNG if self.state.flat_format == "DNG" else ExportFormat.TIFF
+
+    def set_flat_format(self, fmt: str) -> None:
+        """Set the flat master file format ('TIFF' 16-bit or 'DNG' linear)."""
+        fmt = fmt if fmt in ("TIFF", "DNG") else "TIFF"
+        if self.state.flat_format == fmt:
+            return
+        self.state.flat_format = fmt
+        self.session.save_flat_output_prefs()
+
+    def toggle_flat_peek(self, force: Optional[bool] = None) -> None:
+        """Preview the flat master render in the canvas without changing the saved edit.
+
+        ``force`` sets an explicit state; otherwise toggles. Mutually exclusive with
+        the before/after compare view.
+        """
+        if self.state.preview_raw is None:
+            return
+        target = (not self.state.flat_peek) if force is None else force
+        if target == self.state.flat_peek:
+            return
+
+        if target and self.state.compare_mode:
+            self.state.compare_mode = False
+            self.compare_changed.emit(False)
+
+        self.state.flat_peek = target
+        self.flat_peek_changed.emit(target)
+
+        if target:
+            self.request_render(readback_metrics=False, config_override=flat_master_config(self.state.config))
+        else:
+            self.request_render()
 
     def set_local_overlay_visible(self, visible: bool) -> None:
         """Show/hide the dodge/burn mask overlay (view-only; no re-render)."""
@@ -1214,6 +1272,10 @@ class AppController(QObject):
             icc_input_path=self.state.icc_input_path,
             icc_output_path=self.state.icc_output_path,
         )
+        params = self.state.config
+        if self.state.flat_output:
+            params = flat_master_config(params)
+            export_conf = flat_export_config(export_conf, fmt=self._flat_export_format())
         source_exif = self.state.source_exif.get(self.state.current_file_hash or "")
 
         self._run_export_tasks(
@@ -1224,7 +1286,7 @@ class AppController(QObject):
                         "path": self.state.current_file_path,
                         "hash": self.state.current_file_hash,
                     },
-                    params=self.state.config,
+                    params=params,
                     export_settings=preset_from_export_config(export_conf),
                     gpu_enabled=self.state.gpu_enabled,
                     source_exif=source_exif,
@@ -1253,6 +1315,9 @@ class AppController(QObject):
         if files is None:
             files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
 
+        flat = self.state.flat_output
+        flat_fmt = self._flat_export_format()
+
         tasks = []
         for f in files:
             params = self.session.repo.load_file_settings(f["hash"]) or self.state.config
@@ -1265,6 +1330,10 @@ class AppController(QObject):
                 icc_input_path=icc_input,
                 icc_output_path=icc_output,
             )
+
+            if flat:
+                params = flat_master_config(params)
+                final_export = flat_export_config(final_export, fmt=flat_fmt)
 
             bounds_override = None
             if f["hash"] == self.state.current_file_hash:

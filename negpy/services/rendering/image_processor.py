@@ -15,6 +15,7 @@ from negpy.domain.models import (
     ColorSpace,
 )
 from negpy.features.process.models import ProcessMode
+from negpy.features.exposure.models import RenderIntent
 from negpy.features.flatfield.logic import apply_flatfield, flatfield_token
 from negpy.domain.interfaces import PipelineContext
 from negpy.services.rendering.engine import DarkroomEngine
@@ -61,6 +62,12 @@ class ImageProcessor:
             return self.engine_gpu.gpu.backend_name or "WEBGPU"
         return "CPU"
 
+    @staticmethod
+    def _is_flat(settings: WorkspaceConfig) -> bool:
+        """Flat (digital-intermediate) renders run on the CPU engine only, so the
+        master is numerically exact and never subject to the looser GPU parity."""
+        return settings.exposure.render_intent == RenderIntent.FLAT
+
     def run_pipeline(
         self,
         img: ImageBuffer,
@@ -91,6 +98,9 @@ class ImageProcessor:
         )
         if metrics:
             context.metrics.update(metrics)
+
+        if self._is_flat(settings):
+            prefer_gpu = False
 
         if prefer_gpu and self.engine_gpu:
             try:
@@ -131,14 +141,23 @@ class ImageProcessor:
             return Image.fromarray(float_to_uint8(buffer))
         raise ValueError(f"Unsupported bit depth: {bit_depth}")
 
-    def _load_source_f32(self, file_path: str, params: WorkspaceConfig) -> Tuple[np.ndarray, Optional[np.ndarray], str]:
+    def _load_source_f32(self, file_path: str, params: WorkspaceConfig) -> Tuple[np.ndarray, Optional[np.ndarray], str, Optional[str]]:
         """Decode a source file to a flatfield-corrected, EXIF-oriented float32 buffer.
 
-        Returns (f32_buffer, ir_buffer, source_color_space).
+        Returns (f32_buffer, ir_buffer, source_color_space, effective_working_space).
+
+        ``effective_working_space`` is non-None only for a flat (digital-intermediate)
+        render of a camera RAW: the camera's own colour matrix is applied to convert
+        sensor-native linear RGB into ProPhoto-linear *before* normalization/inversion,
+        and the value tells the export encoder to treat the buffer as ProPhoto. For the
+        print path it is always None, so that pipeline is completely unaffected.
         """
         ctx_mgr, metadata = loader_factory.get_loader(file_path)
         source_cs = str(metadata.get("color_space", ColorSpace.ADOBE_RGB.value))
         ir_full = metadata.get("ir")
+
+        want_flat_gamut = self._is_flat(params)
+        cam_matrix = None
 
         with ctx_mgr as raw:
             algo = get_best_demosaic_algorithm(raw)
@@ -155,14 +174,27 @@ class ImageProcessor:
                 user_flip=0,
             )
             rgb = ensure_rgb(rgb)
+            if want_flat_gamut:
+                # Non-camera sources (scanner TIFF, NegPy linear DNG) lack this.
+                cam_matrix = getattr(raw, "rgb_xyz_matrix", None)
 
         f32_buffer = uint16_to_float32(rgb)
+
+        effective_working_space: Optional[str] = None
+        if want_flat_gamut and cam_matrix is not None:
+            from negpy.infrastructure.display.camera_color import apply_camera_to_prophoto, camera_to_prophoto_matrix
+
+            mat = camera_to_prophoto_matrix(cam_matrix)
+            if mat is not None:
+                f32_buffer = apply_camera_to_prophoto(f32_buffer, mat)
+                effective_working_space = ColorSpace.PROPHOTO.value
+
         orientation = metadata.get("orientation", 1)
         f32_buffer = apply_exif_orientation(f32_buffer, orientation)
         f32_buffer = apply_flatfield(f32_buffer, params.flatfield)
         if ir_full is not None:
             ir_full = apply_exif_orientation(ir_full, orientation)
-        return f32_buffer, ir_full, source_cs
+        return f32_buffer, ir_full, source_cs, effective_working_space
 
     def process_export(
         self,
@@ -182,7 +214,11 @@ class ImageProcessor:
             # Ensure both GPU and CPU paths use the same export settings.
             params = dc_replace(params, export=export_settings)
 
-            f32_buffer, ir_full, source_cs = self._load_source_f32(file_path, params)
+            f32_buffer, ir_full, source_cs, eff_working_cs = self._load_source_f32(file_path, params)
+            # Flat masters convert sensor RGB → ProPhoto-linear up front; tell the
+            # encoder the buffer is already ProPhoto so it doesn't re-interpret it.
+            if eff_working_cs is not None:
+                working_color_space = eff_working_cs
             target_cs = export_settings.export_color_space
             if target_cs == ColorSpace.SAME_AS_SOURCE.value:
                 target_cs = source_cs
@@ -190,6 +226,9 @@ class ImageProcessor:
 
             h_raw, w_raw = f32_buffer.shape[:2]
             export_scale = max(h_raw, w_raw) / float(APP_CONFIG.preview_render_size)
+
+            if self._is_flat(params):
+                prefer_gpu = False
 
             if prefer_gpu and self.engine_gpu:
                 buffer, gpu_metrics = self.engine_gpu.process(
@@ -250,6 +289,17 @@ class ImageProcessor:
                 compression="lzw",
             )
             return output_buf.getvalue(), "tiff"
+        elif fmt == ExportFormat.DNG:
+            # Linear digital-negative master. Greyscale is promoted to RGB so the DNG
+            # is always a 3-sample LinearRaw the host can open. Colour-managed to the
+            # target space so the values match the TIFF master.
+            if is_greyscale:
+                img_lum = float_to_uint_luma(np.ascontiguousarray(buffer), bit_depth=16)
+                img_int = np.stack([img_lum, img_lum, img_lum], axis=-1) if img_lum.ndim == 2 else img_lum
+            else:
+                img_int = float_to_uint16(buffer)
+            img_out, _icc = self._apply_color_management_u16_rgb(img_int, working_color_space, color_space, icc_output, icc_input)
+            return self._encode_dng_bytes(img_out), "dng"
         elif fmt == ExportFormat.PNG:
             if is_greyscale:
                 # PIL "I;16" supports 16-bit greyscale, so keep full bit depth here.
@@ -285,6 +335,31 @@ class ImageProcessor:
             self._save_to_pil_buffer(pil_img, output_buf, export_settings, icc_bytes)
             return output_buf.getvalue(), "jpg"
 
+    @staticmethod
+    def _encode_dng_bytes(rgb_u16: np.ndarray) -> bytes:
+        """Write a 16-bit RGB buffer as a LinearRaw DNG and return its bytes.
+
+        ``pidng`` lives in the optional ``scanner`` dependency group, so it is
+        imported lazily; a missing dependency raises a clear error that the export
+        worker surfaces to the user.
+        """
+        import shutil
+        import tempfile
+
+        from negpy.infrastructure.scanners.result import ScanResult
+        from negpy.services.scanning.writer import write_dng_linear
+
+        result = ScanResult(rgb=np.ascontiguousarray(rgb_u16), ir=None, dpi=300, device_model="NegPy Flat Master")
+        tmpdir = tempfile.mkdtemp()
+        try:
+            written = write_dng_linear(result, os.path.join(tmpdir, "flat_master"))
+            with open(written, "rb") as fh:
+                return fh.read()
+        except ModuleNotFoundError as exc:  # pragma: no cover - exercised only without pidng
+            raise RuntimeError("DNG export requires the optional 'pidng' package (scanner extra) to be installed.") from exc
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
     def render_display_array(
         self,
         file_path: str,
@@ -302,9 +377,12 @@ class ImageProcessor:
         try:
             from negpy.infrastructure.display.color_mgmt import apply_display_transform
 
-            f32_buffer, ir_full, _ = self._load_source_f32(file_path, params)
+            f32_buffer, ir_full, _, _ = self._load_source_f32(file_path, params)
             h_raw, w_raw = f32_buffer.shape[:2]
             scale_factor = max(1.0, max(h_raw, w_raw) / float(target_long_px))
+
+            if self._is_flat(params):
+                prefer_gpu = False
 
             if prefer_gpu and self.engine_gpu:
                 buffer, _ = self.engine_gpu.process(f32_buffer, params, scale_factor=scale_factor, ir_buffer=ir_full)

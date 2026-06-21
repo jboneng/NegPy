@@ -4,10 +4,11 @@ from negpy.domain.interfaces import PipelineContext
 from negpy.domain.types import ImageBuffer
 from negpy.features.exposure.logic import (
     apply_characteristic_curve,
+    flat_curve_params,
     normalized_shadow_refs,
     per_channel_curve_params,
 )
-from negpy.features.exposure.models import EXPOSURE_CONSTANTS, ExposureConfig
+from negpy.features.exposure.models import EXPOSURE_CONSTANTS, ExposureConfig, RenderIntent
 from negpy.features.exposure.normalization import (
     LogNegativeBounds,
     analyze_log_exposure_bounds,
@@ -134,6 +135,9 @@ class PhotometricProcessor:
         self.config = config
 
     def process(self, image: ImageBuffer, context: PipelineContext) -> ImageBuffer:
+        if self.config.render_intent == RenderIntent.FLAT:
+            return self._process_flat(image, context)
+
         d_min = EXPOSURE_CONSTANTS["d_min"] if self.config.paper_dmin else 0.0
         anchor = context.metrics.get("metered_anchor") if self.config.auto_exposure else None
         lum_range = context.metrics.get("norm_density_range")
@@ -202,5 +206,55 @@ class PhotometricProcessor:
             res = get_luminance(img_pos)
             res = np.stack([res, res, res], axis=-1)
             return res
+
+        return img_pos
+
+    def _process_flat(self, image: ImageBuffer, context: PipelineContext) -> ImageBuffer:
+        """
+        Flat digital-intermediate render: a low-contrast, neutral positive that
+        keeps the mask-neutralized inversion but drops all creative print
+        decisions. No auto density/grade, no cast removal, no toe/shoulder, no
+        surround/flare — only a fixed low-slope curve with gentle roll-off so the
+        master is consistent across a roll and holds maximal editing latitude.
+
+        Manual global white balance (the WB picker / CMY global) is still honoured
+        because it is an explicit, per-roll-consistent user choice, not automatic
+        grading.
+        """
+        slope, pivot, asym = flat_curve_params(d_min=0.0)
+
+        cmy_max = EXPOSURE_CONSTANTS["cmy_max_density"]
+        cmy_offsets = (
+            self.config.wb_cyan * cmy_max,
+            self.config.wb_magenta * cmy_max,
+            self.config.wb_yellow * cmy_max,
+        )
+
+        is_bw = context.process_mode == ProcessMode.BW
+        mode_val = 1 if is_bw else (2 if context.process_mode == ProcessMode.E6 else 0)
+
+        if is_bw:
+            lum = get_luminance(image)
+            image = np.stack([lum, lum, lum], axis=-1)
+
+        img_pos = apply_characteristic_curve(
+            image,
+            params_r=(pivot, slope),
+            params_g=(pivot, slope),
+            params_b=(pivot, slope),
+            toe=0.0,
+            shoulder=0.0,
+            cmy_offsets=cmy_offsets,
+            d_min=0.0,
+            flare=0.0,
+            surround_gamma=1.0,
+            mode=mode_val,
+            asymptote=asym,
+            nu=1.0,
+        )
+
+        if is_bw:
+            res = get_luminance(img_pos)
+            return np.stack([res, res, res], axis=-1)
 
         return img_pos

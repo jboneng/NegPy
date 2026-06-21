@@ -7,6 +7,7 @@ from negpy.kernel.caching.logic import calculate_config_hash, CacheEntry
 from negpy.kernel.image.validation import ensure_image
 from negpy.kernel.system.logging import get_logger
 from negpy.features.geometry.processor import GeometryProcessor, CropProcessor
+from negpy.features.exposure.models import RenderIntent
 from negpy.features.exposure.processor import (
     NormalizationProcessor,
     PhotometricProcessor,
@@ -126,31 +127,41 @@ class DarkroomEngine:
             pipeline_changed,
         )
 
-        def run_retouch(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
-            return RetouchProcessor(settings.retouch).process(img_in, ctx)
+        # Flat (digital-intermediate) master: keep only geometry + mask-neutralized
+        # inversion, then crop. All creative stages (retouch, lab, local, toning,
+        # finish) are bypassed so the export holds maximal editing latitude.
+        flat_intent = settings.exposure.render_intent == RenderIntent.FLAT
 
-        current_img, pipeline_changed = self._run_stage(
-            current_img,
-            settings.retouch,
-            "retouch",
-            run_retouch,
-            context,
-            pipeline_changed,
-        )
+        if not flat_intent:
 
-        def run_lab(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
-            return PhotoLabProcessor(settings.lab).process(img_in, ctx)
+            def run_retouch(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
+                return RetouchProcessor(settings.retouch).process(img_in, ctx)
 
-        current_img, pipeline_changed = self._run_stage(current_img, settings.lab, "lab", run_lab, context, pipeline_changed)
+            current_img, pipeline_changed = self._run_stage(
+                current_img,
+                settings.retouch,
+                "retouch",
+                run_retouch,
+                context,
+                pipeline_changed,
+            )
 
-        def run_local(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
-            return LocalProcessor(settings.local).process(img_in, ctx)
+            def run_lab(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
+                return PhotoLabProcessor(settings.lab).process(img_in, ctx)
 
-        current_img, pipeline_changed = self._run_stage(current_img, settings.local, "local", run_local, context, pipeline_changed)
+            current_img, pipeline_changed = self._run_stage(current_img, settings.lab, "lab", run_lab, context, pipeline_changed)
 
-        current_img = ToningProcessor(settings.toning).process(current_img, context)
+            def run_local(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
+                return LocalProcessor(settings.local).process(img_in, ctx)
+
+            current_img, pipeline_changed = self._run_stage(current_img, settings.local, "local", run_local, context, pipeline_changed)
+
+            current_img = ToningProcessor(settings.toning).process(current_img, context)
+
         current_img = CropProcessor(settings.geometry).process(current_img, context)
-        current_img = FinishProcessor(settings.finish).process(current_img, context)
+
+        if not flat_intent:
+            current_img = FinishProcessor(settings.finish).process(current_img, context)
 
         try:
             uv_grid = CoordinateMapping.create_uv_grid(
