@@ -130,12 +130,8 @@ def _colorsync_icc() -> Optional[bytes]:
     import ctypes
     import ctypes.util
 
-    cg_path = ctypes.util.find_library("CoreGraphics") or (
-        "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
-    )
-    cf_path = ctypes.util.find_library("CoreFoundation") or (
-        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
-    )
+    cg_path = ctypes.util.find_library("CoreGraphics") or ("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    cf_path = ctypes.util.find_library("CoreFoundation") or ("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
     cg = ctypes.cdll.LoadLibrary(cg_path)
     cf = ctypes.cdll.LoadLibrary(cf_path)
 

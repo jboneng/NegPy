@@ -1,11 +1,11 @@
 import os
 import uuid
 
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from typing import Dict, Any, Optional
 from enum import Enum, StrEnum
 from negpy.features.process.models import ProcessConfig
-from negpy.features.exposure.models import ExposureConfig
+from negpy.features.exposure.models import ExposureConfig, RenderIntent
 from negpy.features.geometry.models import GeometryConfig
 from negpy.features.lab.models import LabConfig
 from negpy.features.local.models import LocalAdjustmentsConfig, PolygonMask
@@ -52,6 +52,7 @@ class ExportFormat(StrEnum):
     JPEG = "JPEG"
     TIFF = "TIFF"
     PNG = "PNG"
+    DNG = "DNG"
 
 
 class ExportPresetOutputMode(StrEnum):
@@ -310,3 +311,50 @@ class WorkspaceConfig:
             metadata=MetadataConfig(**filter_keys(MetadataConfig, data)),
             export=ExportConfig(**filter_keys(ExportConfig, data)),
         )
+
+
+# Wide-gamut working/output space for the flat digital-intermediate master, so the
+# 16-bit export preserves the widest practical colour range for downstream editing.
+FLAT_MASTER_COLOR_SPACE = ColorSpace.PROPHOTO.value
+
+
+def flat_master_config(config: WorkspaceConfig) -> WorkspaceConfig:
+    """
+    Derive a flat digital-intermediate ("Flat — for editing elsewhere") render
+    config from an edit, without mutating it.
+
+    Keeps the framing (geometry/crop), process mode and normalization bounds, and
+    any explicit global white balance, but switches the Print stage to the flat
+    render intent and turns off every automatic/creative print decision so the
+    result is neutral, low-contrast and consistent across a roll. The creative
+    stages (lab, local, toning, finish, retouch) are bypassed by the engine when
+    the flat intent is set, so their values here are left untouched.
+    """
+    flat_exposure = replace(
+        config.exposure,
+        render_intent=RenderIntent.FLAT,
+        auto_exposure=False,
+        auto_normalize_contrast=False,
+        cast_removal=False,
+        surround=False,
+        flare=False,
+        paper_dmin=False,
+        toe=0.0,
+        shoulder=0.0,
+    )
+    return replace(config, exposure=flat_exposure)
+
+
+def flat_export_config(export: ExportConfig, fmt: str = ExportFormat.TIFF) -> ExportConfig:
+    """
+    Override export settings for a flat master: a high-bit-depth, wide-gamut,
+    full-resolution file with no creative paper sizing. ``fmt`` selects TIFF
+    (16-bit, default) or DNG (linear digital negative).
+    """
+    return replace(
+        export,
+        export_fmt=fmt,
+        export_color_space=FLAT_MASTER_COLOR_SPACE,
+        export_resolution_mode=ExportResolutionMode.ORIGINAL.value,
+        paper_aspect_ratio=AspectRatio.ORIGINAL,
+    )

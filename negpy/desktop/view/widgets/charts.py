@@ -261,6 +261,8 @@ class PhotometricCurveWidget(QWidget):
         pivot: float | None = None,
         slopes: tuple[float, float, float] | None = None,
         pivots: tuple[float, float, float] | None = None,
+        asymptote: float | None = None,
+        nu: float | None = None,
     ) -> None:
         from negpy.features.exposure.logic import LogisticSigmoid, _expit, compute_pivot, grade_to_slope
         from negpy.features.exposure.models import EXPOSURE_CONSTANTS
@@ -287,6 +289,7 @@ class PhotometricCurveWidget(QWidget):
             curve = LogisticSigmoid(
                 contrast=s,
                 pivot=p,
+                d_max=asymptote,
                 d_min=d_min,
                 toe=params.toe,
                 toe_width=params.toe_width,
@@ -294,6 +297,7 @@ class PhotometricCurveWidget(QWidget):
                 shoulder_width=params.shoulder_width,
                 flare=flare,
                 surround_gamma=surround_gamma,
+                nu=nu,
             )
             d = curve(ensure_image(x_log_exp))
             t = np.power(10.0, -d)

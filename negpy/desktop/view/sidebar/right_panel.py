@@ -242,32 +242,44 @@ class RightPanel(QWidget):
         from negpy.features.exposure.models import EXPOSURE_CONSTANTS
 
         config = self.controller.session.state.config.exposure
-        # Mirror PhotometricProcessor so the plotted curve matches the render under
-        # the Auto Grade / Auto Density / Cast Removal toggles. CPU stores
-        # "final_bounds", GPU stores "log_bounds".
-        density_range = effective_grade_range(
-            config.auto_normalize_contrast,
-            metrics.get("norm_density_range"),
-            metrics.get("textural_range"),
-        )
-        d_min = EXPOSURE_CONSTANTS["d_min"] if config.paper_dmin else 0.0
-        anchor = metrics.get("metered_anchor") if config.auto_exposure else None
-        bounds = metrics.get("final_bounds") or metrics.get("log_bounds")
-        shadow_refs_norm = normalized_shadow_refs(bounds, metrics.get("shadow_log_refs"))
-        slopes, pivots = per_channel_curve_params(
-            config.grade,
-            config.density,
-            config.auto_normalize_contrast,
-            config.cast_removal,
-            metrics.get("norm_density_range"),
-            shadow_refs_norm,
-            metrics.get("textural_range"),
-            d_min=d_min,
-            anchor=anchor,
-        )
-        # Green channel is the base curve (white reference + stats slope).
-        slope, pivot = slopes[1], pivots[1]
-        self.curve_widget.update_curve(config, slope=slope, pivot=pivot, slopes=slopes, pivots=pivots)
+
+        # While peeking the flat master, plot the flat curve so the chart matches
+        # what the canvas is showing.
+        if self.controller.state.flat_peek:
+            from negpy.domain.models import flat_master_config
+            from negpy.features.exposure.logic import flat_curve_params
+
+            flat_cfg = flat_master_config(self.controller.session.state.config).exposure
+            slope, f_pivot, f_asym = flat_curve_params(d_min=0.0)
+            density_range = None
+            self.curve_widget.update_curve(flat_cfg, slope=slope, pivot=f_pivot, asymptote=f_asym, nu=1.0)
+        else:
+            # Mirror PhotometricProcessor so the plotted curve matches the render under
+            # the Auto Grade / Auto Density / Cast Removal toggles. CPU stores
+            # "final_bounds", GPU stores "log_bounds".
+            density_range = effective_grade_range(
+                config.auto_normalize_contrast,
+                metrics.get("norm_density_range"),
+                metrics.get("textural_range"),
+            )
+            d_min = EXPOSURE_CONSTANTS["d_min"] if config.paper_dmin else 0.0
+            anchor = metrics.get("metered_anchor") if config.auto_exposure else None
+            bounds = metrics.get("final_bounds") or metrics.get("log_bounds")
+            shadow_refs_norm = normalized_shadow_refs(bounds, metrics.get("shadow_log_refs"))
+            slopes, pivots = per_channel_curve_params(
+                config.grade,
+                config.density,
+                config.auto_normalize_contrast,
+                config.cast_removal,
+                metrics.get("norm_density_range"),
+                shadow_refs_norm,
+                metrics.get("textural_range"),
+                d_min=d_min,
+                anchor=anchor,
+            )
+            # Green channel is the base curve (white reference + stats slope).
+            slope, pivot = slopes[1], pivots[1]
+            self.curve_widget.update_curve(config, slope=slope, pivot=pivot, slopes=slopes, pivots=pivots)
 
         from negpy.features.exposure.stats import negative_statistics
 

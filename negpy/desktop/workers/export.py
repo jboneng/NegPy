@@ -73,8 +73,10 @@ class ExportWorker(QObject):
                 )
 
                 if bits:
-                    # Embed metadata if config is provided
-                    if task.metadata_config is not None:
+                    # Embed metadata if config is provided. Skipped for DNG: it is a
+                    # TIFF-based raw container and the EXIF re-write would strip its
+                    # DNG tags and corrupt the file.
+                    if task.metadata_config is not None and task.export_settings.export_fmt != ExportFormat.DNG:
                         bits = embed_metadata(bits, task.metadata_config, task.source_exif)
 
                     source_dir = os.path.dirname(task.file_info["path"])
@@ -88,7 +90,7 @@ class ExportWorker(QObject):
                         out_dir = source_dir
                     os.makedirs(out_dir, exist_ok=True)
 
-                    _EXT = {ExportFormat.JPEG: "jpg", ExportFormat.TIFF: "tiff", ExportFormat.PNG: "png"}
+                    _EXT = {ExportFormat.JPEG: "jpg", ExportFormat.TIFF: "tiff", ExportFormat.PNG: "png", ExportFormat.DNG: "dng"}
                     ext = _EXT.get(task.export_settings.export_fmt, "jpg")
 
                     filename = render_export_filename(

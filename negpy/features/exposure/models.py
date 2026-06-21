@@ -1,5 +1,23 @@
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Dict
+
+
+class RenderIntent(StrEnum):
+    """
+    How the Print stage renders the positive.
+
+    PRINT — the full photographic-paper look (the default NegPy conversion).
+    FLAT  — a low-contrast, neutral "digital intermediate" master intended for
+            further editing in Lightroom/Darktable/Photoshop. The mask-neutralized
+            inversion is kept, but the creative print decisions (auto density/grade,
+            cast removal, toe/shoulder, surround/flare) and the downstream creative
+            stages (lab, local, toning, finish) are bypassed so maximal tonal and
+            colour information is preserved with gentle highlight/shadow roll-off.
+    """
+
+    PRINT = "print"
+    FLAT = "flat"
 
 
 @dataclass(frozen=True)
@@ -30,6 +48,7 @@ class ExposureConfig:
     surround: bool = False
     auto_exposure: bool = True
     auto_normalize_contrast: bool = True
+    render_intent: str = RenderIntent.PRINT
 
     def __post_init__(self) -> None:
         """
@@ -79,4 +98,15 @@ EXPOSURE_CONSTANTS: Dict[str, Any] = {
     "auto_density_target_offset": 0.0,
     # Veiling-glare floor out=(r+f)/(1+f), r normalized to paper white; applied when flare is on.
     "flare_fraction": 0.005,
+    # ── Flat / digital-intermediate master (RenderIntent.FLAT) ──────────────
+    # A deliberately low fixed slope and a compressed virtual asymptote give a
+    # low-contrast positive whose own H&D shoulder/toe provide the gentle
+    # highlight/shadow roll-off, while keeping every channel well inside [0, 1]
+    # (no clipping) with headroom for downstream editing. These are FIXED (no
+    # per-frame metering) so a roll of equally-exposed scans renders identically.
+    "flat_slope": 2.0,
+    "flat_asymptote": 1.5,
+    # Where the assumed midtone anchor lands, as a fraction of the flat asymptote
+    # (≈ mid grey). Keeps the master neutral and centred.
+    "flat_anchor_target": 0.42,
 }

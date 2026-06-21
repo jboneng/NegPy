@@ -95,6 +95,13 @@ class AppState:
     # Export presets (globally managed, not per-file)
     export_presets: List[ExportPreset] = field(default_factory=list)
 
+    # Flat "for editing elsewhere" master output (digital intermediate).
+    # When on, export and the optional preview-peek use the flat render intent.
+    flat_output: bool = False
+    flat_format: str = "TIFF"  # "TIFF" (16-bit) or "DNG" (linear)
+    # Transient: preview is currently peeking the flat render (not persisted).
+    flat_peek: bool = False
+
 
 class AssetListModel(QAbstractListModel):
     """
@@ -277,6 +284,13 @@ class DesktopSessionManager(QObject):
         if saved_soft_proof is not None:
             self.state.soft_proof_enabled = bool(saved_soft_proof)
 
+        saved_flat_output = self.repo.get_global_setting("flat_output")
+        if saved_flat_output is not None:
+            self.state.flat_output = bool(saved_flat_output)
+        saved_flat_format = self.repo.get_global_setting("flat_format")
+        if saved_flat_format in ("TIFF", "DNG"):
+            self.state.flat_format = saved_flat_format
+
         self.state.export_presets = self.repo.load_export_presets()
 
     def set_gpu_enabled(self, enabled: bool) -> None:
@@ -316,6 +330,11 @@ class DesktopSessionManager(QObject):
     def save_export_presets(self) -> None:
         """Persists current export presets."""
         self.repo.save_export_presets(self.state.export_presets)
+
+    def save_flat_output_prefs(self) -> None:
+        """Persists the flat ('for editing elsewhere') output preferences."""
+        self.repo.save_global_setting("flat_output", self.state.flat_output)
+        self.repo.save_global_setting("flat_format", self.state.flat_format)
 
     def _apply_sticky_settings(self, config: WorkspaceConfig, only_global: bool = False) -> WorkspaceConfig:
         """

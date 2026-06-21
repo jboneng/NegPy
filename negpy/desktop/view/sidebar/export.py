@@ -40,6 +40,7 @@ class ExportSidebar(BaseSidebar):
         self.form.load(self._config_to_form_values())
         self.layout.addWidget(self.form)
 
+        self._add_flat_master_section()
         self._add_preview_section()
         self._add_batch_section()
 
@@ -58,6 +59,13 @@ class ExportSidebar(BaseSidebar):
 
         self.manage_presets_btn.clicked.connect(self._open_presets_dialog)
         self.export_presets_btn.clicked.connect(self.controller.request_preset_export)
+
+        self.flat_output_checkbox.toggled.connect(self._on_flat_output_toggled)
+        self.flat_format_combo.currentIndexChanged.connect(self._on_flat_format_changed)
+        self.flat_peek_btn.toggled.connect(lambda checked: self.controller.toggle_flat_peek(force=checked))
+        self.flat_bake_btn.clicked.connect(self.controller.request_batch_normalization)
+        self.controller.flat_output_changed.connect(self._on_flat_output_changed)
+        self.controller.flat_peek_changed.connect(self._on_flat_peek_changed)
 
         self.apply_all_btn.toggled.connect(self._update_apply_all_style)
         self.batch_export_btn.clicked.connect(
@@ -146,6 +154,102 @@ class ExportSidebar(BaseSidebar):
         section.set_content(content)
         section.expanded_changed.connect(lambda checked: repo.save_global_setting("section_expanded_contact_sheet", checked))
         self.layout.addWidget(section)
+
+    # --- Flat master ("for editing elsewhere") -------------------------------
+
+    def _add_flat_master_section(self) -> None:
+        """Output-intent override producing a flat, neutral digital intermediate
+        for editing in Lightroom/Darktable/Photoshop."""
+        self.layout.addWidget(section_subheader("OUTPUT INTENT"))
+
+        self.flat_output_checkbox = QCheckBox("Flat — for editing elsewhere")
+        self.flat_output_checkbox.setChecked(self.state.flat_output)
+        self.flat_output_checkbox.setToolTip(
+            "Export a flat, neutral, low-contrast master that keeps maximum tonal and colour "
+            "information for editing in Lightroom, Darktable or Photoshop. Skips the creative "
+            "print look (auto density/grade, cast removal, lab effects, toning, vignette) and "
+            "writes a wide-gamut, high-bit-depth file. Your in-app preview is unaffected."
+        )
+        self.layout.addWidget(self.flat_output_checkbox)
+
+        fmt_row = QHBoxLayout()
+        fmt_label = QLabel("Master")
+        fmt_label.setFixedWidth(52)
+        fmt_row.addWidget(fmt_label)
+        self.flat_format_combo = QComboBox()
+        self.flat_format_combo.addItem("16-bit TIFF", "TIFF")
+        self.flat_format_combo.addItem("Linear DNG", "DNG")
+        idx = self.flat_format_combo.findData(self.state.flat_format)
+        self.flat_format_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.flat_format_combo.setToolTip(
+            "16-bit TIFF: widely compatible, ProPhoto RGB, ready to edit.\n"
+            "Linear DNG: a linear digital negative (requires the optional 'pidng' package)."
+        )
+        fmt_row.addWidget(self.flat_format_combo)
+        self.layout.addLayout(fmt_row)
+
+        self.flat_peek_btn = QPushButton(" Preview flat")
+        self.flat_peek_btn.setCheckable(True)
+        self.flat_peek_btn.setChecked(self.state.flat_peek)
+        self.flat_peek_btn.setIcon(qta.icon("fa5s.eye", color=THEME.text_primary))
+        self.flat_peek_btn.setToolTip("Temporarily show the flat master in the canvas (does not change your edit)")
+        self.layout.addWidget(self.flat_peek_btn)
+
+        self.flat_hint_label = QLabel("Exports a flat ProPhoto master. Size/colour rows above are overridden for this output.")
+        self.flat_hint_label.setWordWrap(True)
+        self.flat_hint_label.setStyleSheet(f"color: {THEME.text_muted}; font-size: 10px;")
+        self.layout.addWidget(self.flat_hint_label)
+
+        # Roll-consistency nudge: a flat master is only identical across frames
+        # once the roll shares one normalization baseline (locked bounds). Until
+        # then, per-frame auto bounds make each frame's tones drift.
+        self.flat_roll_warning = QLabel("For consistent masters across a roll, lock one baseline for every frame.")
+        self.flat_roll_warning.setWordWrap(True)
+        self.flat_roll_warning.setStyleSheet(f"color: {THEME.accent_edited}; font-size: 10px;")
+        self.layout.addWidget(self.flat_roll_warning)
+
+        self.flat_bake_btn = QPushButton(" Bake roll baseline")
+        self.flat_bake_btn.setIcon(qta.icon("fa5s.link", color=THEME.text_primary))
+        self.flat_bake_btn.setToolTip(
+            "Measure every visible frame's exposure bounds and apply their shared average, so flat "
+            "masters render consistently across the roll."
+        )
+        self.layout.addWidget(self.flat_bake_btn)
+
+        self._sync_flat_enabled()
+
+    def _sync_flat_enabled(self) -> None:
+        on = self.flat_output_checkbox.isChecked()
+        self.flat_format_combo.setEnabled(on)
+        self.flat_hint_label.setVisible(on)
+        self._sync_flat_roll_warning()
+
+    def _sync_flat_roll_warning(self) -> None:
+        """Show the roll-baseline nudge only when flat output is on and the roll
+        doesn't yet share a locked normalization baseline."""
+        on = self.flat_output_checkbox.isChecked()
+        locked = self.state.config.process.use_roll_average and self.state.config.process.is_locked_initialized
+        show = on and not locked
+        self.flat_roll_warning.setVisible(show)
+        self.flat_bake_btn.setVisible(show)
+
+    def _on_flat_output_toggled(self, checked: bool) -> None:
+        self.controller.set_flat_output(checked)
+        self._sync_flat_enabled()
+
+    def _on_flat_format_changed(self, _index: int) -> None:
+        self.controller.set_flat_format(self.flat_format_combo.currentData())
+
+    def _on_flat_output_changed(self, enabled: bool) -> None:
+        self.flat_output_checkbox.blockSignals(True)
+        self.flat_output_checkbox.setChecked(enabled)
+        self.flat_output_checkbox.blockSignals(False)
+        self._sync_flat_enabled()
+
+    def _on_flat_peek_changed(self, active: bool) -> None:
+        self.flat_peek_btn.blockSignals(True)
+        self.flat_peek_btn.setChecked(active)
+        self.flat_peek_btn.blockSignals(False)
 
     # --- Preview (soft proof + monitor profile, preview only) ----------------
 
@@ -372,8 +476,14 @@ class ExportSidebar(BaseSidebar):
             self.cs_gap_input.setValue(conf.contact_sheet_gap)
             self.cs_margin_input.setValue(conf.contact_sheet_margin)
             self.cs_max_tiles_input.setValue(conf.contact_sheet_max_tiles)
+            self.flat_output_checkbox.setChecked(self.state.flat_output)
+            fmt_idx = self.flat_format_combo.findData(self.state.flat_format)
+            self.flat_format_combo.setCurrentIndex(fmt_idx if fmt_idx >= 0 else 0)
+            self.flat_peek_btn.setChecked(self.state.flat_peek)
         finally:
             self.block_signals(False)
+
+        self._sync_flat_enabled()
 
         self._refresh_proof_mismatch_warning()
         self._rebuild_preset_rows()
@@ -386,6 +496,9 @@ class ExportSidebar(BaseSidebar):
             self.cs_gap_input,
             self.cs_margin_input,
             self.cs_max_tiles_input,
+            self.flat_output_checkbox,
+            self.flat_format_combo,
+            self.flat_peek_btn,
         ]
         for w in widgets:
             w.blockSignals(blocked)
