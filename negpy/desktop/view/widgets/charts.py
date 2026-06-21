@@ -1,10 +1,11 @@
 from typing import Any
 
 import numpy as np
-from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtCore import QPointF, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
+    QFont,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -22,32 +23,49 @@ class HistogramWidget(QWidget):
     """
     Native high-performance histogram using QPainter.
     Offers additive blending-like visuals and reliable updates.
+
+    Raw per-channel bin counts are retained so the vertical scale can switch
+    between linear and logarithmic without re-deriving them from the source.
     """
+
+    # Emitted when the user flips the in-widget LIN/LOG toggle (True == log).
+    scale_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumHeight(40)
-        self._data_r: list = []
-        self._data_g: list = []
-        self._data_b: list = []
-        self._data_l: list = []
+        # Raw bin counts per channel (256-length arrays); empty until first frame.
+        self._counts: dict[str, np.ndarray] = {}
+        self._log_scale: bool = False
         self._clip_low: dict[str, bool] = {}
         self._clip_high: dict[str, bool] = {}
         self._clip_low_frac: float = 0.0
         self._clip_high_frac: float = 0.0
+        # Hit rectangles for the LIN/LOG toggle, recomputed each paint.
+        self._lin_rect = QRect()
+        self._log_rect = QRect()
+        self.setMouseTracking(True)
 
     def clip_fractions(self) -> tuple[float, float]:
         """Worst-channel shadow / highlight clipped fraction (0..1) of the last frame."""
         return self._clip_low_frac, self._clip_high_frac
 
+    def log_scale(self) -> bool:
+        return self._log_scale
+
+    def set_log_scale(self, enabled: bool) -> None:
+        """Switch the vertical axis between linear and logarithmic scaling."""
+        enabled = bool(enabled)
+        if enabled == self._log_scale:
+            return
+        self._log_scale = enabled
+        self.update()
+
     def update_data(self, buffer: Any) -> None:
         """Calculates histograms and triggers repaint."""
         if buffer is None:
-            self._data_r = []
-            self._data_g = []
-            self._data_b = []
-            self._data_l = []
+            self._counts = {}
             self._clip_low = {}
             self._clip_high = {}
             self._clip_low_frac = 0.0
@@ -56,10 +74,12 @@ class HistogramWidget(QWidget):
             return
 
         if isinstance(buffer, np.ndarray) and buffer.shape == (4, 256):
-            self._data_r = self._normalize(buffer[0])
-            self._data_g = self._normalize(buffer[1])
-            self._data_b = self._normalize(buffer[2])
-            self._data_l = self._normalize(buffer[3])
+            self._counts = {
+                "r": buffer[0].astype(float),
+                "g": buffer[1].astype(float),
+                "b": buffer[2].astype(float),
+                "l": buffer[3].astype(float),
+            }
             totals = [max(1.0, float(buffer[c].sum())) for c in range(3)]
             self._clip_low = {
                 "r": buffer[0][0] / totals[0] > _CLIP_THRESH,
@@ -83,10 +103,12 @@ class HistogramWidget(QWidget):
             buffer = buffer[::4, ::4]
 
         lum = get_luminance(buffer)
-        self._data_r = self._calc_hist(buffer[..., 0])
-        self._data_g = self._calc_hist(buffer[..., 1])
-        self._data_b = self._calc_hist(buffer[..., 2])
-        self._data_l = self._calc_hist(lum)
+        self._counts = {
+            "r": self._hist_counts(buffer[..., 0]),
+            "g": self._hist_counts(buffer[..., 1]),
+            "b": self._hist_counts(buffer[..., 2]),
+            "l": self._hist_counts(lum),
+        }
 
         n = max(1, buffer.shape[0] * buffer.shape[1])
         self._clip_low = {
@@ -103,18 +125,21 @@ class HistogramWidget(QWidget):
         self._clip_high_frac = max(float(np.sum(buffer[..., c] >= 0.998)) / n for c in range(3))
         self.update()
 
-    def _normalize(self, counts: np.ndarray) -> list:
-        max_val = float(np.max(counts))
-        if max_val <= 0:
-            return []
-        return (counts.astype(float) / max_val).tolist()
-
-    def _calc_hist(self, data: np.ndarray) -> list:
+    @staticmethod
+    def _hist_counts(data: np.ndarray) -> np.ndarray:
         hist, _ = np.histogram(data, bins=256, range=(0, 1))
-        max_val = hist.max()
+        return hist.astype(float)
+
+    def _display(self, key: str) -> list:
+        """Normalized 0..1 plot values for a channel under the current scale mode."""
+        counts = self._counts.get(key)
+        if counts is None or counts.size == 0:
+            return []
+        vals = np.log1p(counts) if self._log_scale else counts
+        max_val = float(np.max(vals))
         if max_val <= 0:
             return []
-        return (hist.astype(float) / max_val).tolist()
+        return (vals / max_val).tolist()
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -138,10 +163,10 @@ class HistogramWidget(QWidget):
             painter.drawLine(0, y, w, y)
 
         # Channels
-        self._draw_channel(painter, self._data_l, "#D4D4D4", 30, 150, w, h)
-        self._draw_channel(painter, self._data_r, THEME.channel_red, 80, 200, w, h)
-        self._draw_channel(painter, self._data_g, THEME.channel_green, 80, 200, w, h)
-        self._draw_channel(painter, self._data_b, THEME.channel_blue, 80, 200, w, h)
+        self._draw_channel(painter, self._display("l"), "#D4D4D4", 30, 150, w, h)
+        self._draw_channel(painter, self._display("r"), THEME.channel_red, 80, 200, w, h)
+        self._draw_channel(painter, self._display("g"), THEME.channel_green, 80, 200, w, h)
+        self._draw_channel(painter, self._display("b"), THEME.channel_blue, 80, 200, w, h)
 
         # H2: Zone tick marks at 0.1 intervals along the bottom
         painter.setPen(QPen(QColor("#3A3A3A"), 1))
@@ -151,6 +176,63 @@ class HistogramWidget(QWidget):
 
         # H1: Per-channel clipping indicators
         self._draw_clip_indicators(painter, w, h)
+
+        # LIN/LOG scale toggle (bottom-right, clear of the top-corner clip marks)
+        self._draw_scale_toggle(painter, w, h)
+
+    def _draw_scale_toggle(self, painter: QPainter, w: int, h: int) -> None:
+        seg_w, seg_h = 24, 13
+        margin = 5
+        x0 = w - seg_w * 2 - margin
+        y0 = h - seg_h - margin
+        self._lin_rect = QRect(x0, y0, seg_w, seg_h)
+        self._log_rect = QRect(x0 + seg_w, y0, seg_w, seg_h)
+        outer = QRect(x0, y0, seg_w * 2, seg_h)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(10, 10, 10, 200)))
+        painter.drawRoundedRect(outer, 3, 3)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor("#333333"), 1))
+        painter.drawRoundedRect(outer, 3, 3)
+
+        font = QFont()
+        font.setPixelSize(8)
+        font.setBold(True)
+        painter.setFont(font)
+
+        active = QColor("#E5E5E5")
+        inactive = QColor("#6B6B6B")
+        highlight = QColor(60, 130, 255, 70)
+
+        if not self._log_scale:
+            painter.fillRect(self._lin_rect.adjusted(1, 1, -1, -1), QBrush(highlight))
+        else:
+            painter.fillRect(self._log_rect.adjusted(1, 1, -1, -1), QBrush(highlight))
+
+        painter.setPen(QPen(active if not self._log_scale else inactive))
+        painter.drawText(self._lin_rect, Qt.AlignmentFlag.AlignCenter, "LIN")
+        painter.setPen(QPen(active if self._log_scale else inactive))
+        painter.drawText(self._log_rect, Qt.AlignmentFlag.AlignCenter, "LOG")
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            if self._lin_rect.contains(pos) and self._log_scale:
+                self.set_log_scale(False)
+                self.scale_changed.emit(False)
+                return
+            if self._log_rect.contains(pos) and not self._log_scale:
+                self.set_log_scale(True)
+                self.scale_changed.emit(True)
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        over = self._lin_rect.contains(pos) or self._log_rect.contains(pos)
+        self.setCursor(Qt.CursorShape.PointingHandCursor if over else Qt.CursorShape.ArrowCursor)
+        super().mouseMoveEvent(event)
 
     def _draw_clip_indicators(self, painter: QPainter, w: int, h: int) -> None:
         channels = [("r", THEME.channel_red), ("g", THEME.channel_green), ("b", THEME.channel_blue)]
@@ -461,7 +543,7 @@ class PhotometricCurveWidget(QWidget):
 class MiniHistogramWidget(QWidget):
     """
     20px-tall luminance strip shown behind the Exposure section header.
-    Reuses HistogramWidget._normalize; draws only the L channel at ~40% opacity.
+    Draws only the L channel at ~40% opacity (always linear scale).
     """
 
     def __init__(self, parent=None):

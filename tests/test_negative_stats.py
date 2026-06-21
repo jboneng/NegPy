@@ -78,5 +78,55 @@ def test_clip_fractions_from_bin_array(qapp):
     assert abs(hi - 0.20) < 1e-4
 
 
+def test_histogram_log_scale_lifts_small_bins(qapp):
+    from negpy.desktop.view.widgets.charts import HistogramWidget
+
+    w = HistogramWidget()
+    # A dominant peak plus a tiny tail bin: linear hides the tail, log reveals it.
+    buf = np.zeros((4, 256), dtype=np.float32)
+    buf[:, 128] = 1000.0
+    buf[:, 200] = 1.0
+    w.update_data(buf)
+
+    assert w.log_scale() is False
+    lin = w._display("l")
+    assert abs(lin[128] - 1.0) < 1e-6
+    assert abs(lin[200] - 0.001) < 1e-6  # 1 / 1000
+
+    w.set_log_scale(True)
+    assert w.log_scale() is True
+    log = w._display("l")
+    assert abs(log[128] - 1.0) < 1e-6  # peak still normalizes to 1
+    # log1p(1) / log1p(1000) ≈ 0.0993 — two orders of magnitude more visible
+    assert log[200] > lin[200] * 50
+    assert 0.05 < log[200] < 0.15
+
+
+def test_histogram_set_log_scale_idempotent_and_toggle(qapp):
+    from negpy.desktop.view.widgets.charts import HistogramWidget
+
+    w = HistogramWidget()
+    received: list[bool] = []
+    w.scale_changed.connect(received.append)
+
+    # set_log_scale is a programmatic setter; it should not emit the user signal.
+    w.set_log_scale(True)
+    w.set_log_scale(True)  # no-op, already on
+    assert w.log_scale() is True
+    assert received == []
+
+    w.set_log_scale(False)
+    assert w.log_scale() is False
+
+
+def test_histogram_empty_display_safe(qapp):
+    from negpy.desktop.view.widgets.charts import HistogramWidget
+
+    w = HistogramWidget()
+    assert w._display("l") == []
+    w.set_log_scale(True)
+    assert w._display("r") == []
+
+
 if __name__ == "__main__":
     unittest.main()

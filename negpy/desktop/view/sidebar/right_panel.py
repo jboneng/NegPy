@@ -52,6 +52,10 @@ class RightPanel(QWidget):
         self.curve_widget = PhotometricCurveWidget()
         self.stats_widget = NegativeStatsWidget()
 
+        repo = self.controller.session.repo
+        self.hist_widget.set_log_scale(bool(repo.get_global_setting("histogram_log_scale")))
+        self.hist_widget.scale_changed.connect(lambda enabled: repo.save_global_setting("histogram_log_scale", bool(enabled)))
+
         analysis_layout.addWidget(self.hist_widget, 1)
         analysis_layout.addWidget(self.curve_widget, 1)
         analysis_layout.addWidget(self.stats_widget, 0)
