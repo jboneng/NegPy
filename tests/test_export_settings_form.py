@@ -126,3 +126,33 @@ def test_load_does_not_emit_changed(qapp):
     form.changed.connect(lambda: fired.append(True))
     form.load(_values())
     assert not fired
+
+
+def test_flat_mode_hides_format_section(qapp):
+    form = ExportSettingsForm()
+    form.load(_values())
+    assert not form._format_section.isHidden()
+    form.set_flat_mode(True)
+    assert form._format_section.isHidden()
+    assert form.flat_mode()
+    form.set_flat_mode(False)
+    assert not form._format_section.isHidden()
+
+
+def test_flat_mode_hides_paper_ratio_for_original(qapp):
+    form = ExportSettingsForm()
+    form.load(_values(export_resolution_mode=ExportResolutionMode.ORIGINAL.value))
+    form.set_flat_mode(True)
+    assert form._ratio_row_widget.isHidden()
+    form.mode_target_px_btn.setChecked(True)
+    assert not form._ratio_row_widget.isHidden()
+
+
+def test_flat_mode_skips_jxl_export_block(qapp):
+    form = ExportSettingsForm()
+    form.load(_values(export_fmt=ExportFormat.JXL, export_color_space=ColorSpace.SRGB.value))
+    form._flat_mode = True
+    assert not form.is_export_blocked()
+    form.set_flat_mode(False)
+    form.set_flat_mode(True)
+    assert not form.is_export_blocked()

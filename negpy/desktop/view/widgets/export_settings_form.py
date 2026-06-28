@@ -55,6 +55,7 @@ class ExportSettingsForm(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._loading = False
+        self._flat_mode = False
         self._init_ui()
 
     @staticmethod
@@ -76,7 +77,12 @@ class ExportSettingsForm(QWidget):
     # --- FORMAT --------------------------------------------------------------
 
     def _build_format(self, root: QVBoxLayout) -> None:
-        root.addWidget(section_subheader("FORMAT"))
+        self._format_section = QWidget()
+        format_box = QVBoxLayout(self._format_section)
+        format_box.setContentsMargins(0, 0, 0, 0)
+        format_box.setSpacing(10)
+
+        format_box.addWidget(section_subheader("FORMAT"))
 
         fmt_row = QHBoxLayout()
         fmt_row.addWidget(self._row_label("Format"))
@@ -84,7 +90,7 @@ class ExportSettingsForm(QWidget):
         self.fmt_combo.addItems([f.value for f in ExportFormat])
         self.fmt_combo.currentTextChanged.connect(self._on_fmt_changed)
         fmt_row.addWidget(self.fmt_combo)
-        root.addLayout(fmt_row)
+        format_box.addLayout(fmt_row)
 
         self._quality_container = QWidget()
         quality_box = QVBoxLayout(self._quality_container)
@@ -92,10 +98,11 @@ class ExportSettingsForm(QWidget):
         self.quality_spin = CompactSlider("JPEG Quality", 1, 100, 90, step=1, precision=1)
         self.quality_spin.valueChanged.connect(self._on_changed)
         quality_box.addWidget(self.quality_spin)
-        root.addWidget(self._quality_container)
+        format_box.addWidget(self._quality_container)
 
-        self._build_jxl(root)
-        self._build_webp(root)
+        self._build_jxl(format_box)
+        self._build_webp(format_box)
+        root.addWidget(self._format_section)
 
     def _build_jxl(self, root: QVBoxLayout) -> None:
         self._jxl_container = QWidget()
@@ -203,14 +210,16 @@ class ExportSettingsForm(QWidget):
         target_px_inner.addWidget(self.target_px_input)
         root.addWidget(self._target_px_container)
 
-        ratio_row = QHBoxLayout()
+        self._ratio_row_widget = QWidget()
+        ratio_row = QHBoxLayout(self._ratio_row_widget)
+        ratio_row.setContentsMargins(0, 0, 0, 0)
         ratio_row.addWidget(self._row_label("Paper ratio"))
         self.ratio_combo = QComboBox()
         ratios = [AspectRatio.ORIGINAL] + [r.value for r in AspectRatio if r != AspectRatio.ORIGINAL]
         self.ratio_combo.addItems(ratios)
         self.ratio_combo.currentTextChanged.connect(self._on_changed)
         ratio_row.addWidget(self.ratio_combo)
-        root.addLayout(ratio_row)
+        root.addWidget(self._ratio_row_widget)
 
     # --- COLOR ---------------------------------------------------------------
 
@@ -350,6 +359,8 @@ class ExportSettingsForm(QWidget):
 
     def is_export_blocked(self) -> bool:
         """True when the current JXL + colour space pairing can't be tagged."""
+        if self._flat_mode:
+            return False
         return self.fmt_combo.currentText() == ExportFormat.JXL and self.color_space_combo.currentText() not in _JXL_SUPPORTED
 
     def _refresh_jxl_warning(self) -> None:
@@ -364,7 +375,9 @@ class ExportSettingsForm(QWidget):
     def _on_mode_toggled(self, _id: int, checked: bool) -> None:
         if not checked:
             return
-        self._update_mode_visibility(self._current_mode_value())
+        mode = self._current_mode_value()
+        self._update_mode_visibility(mode)
+        self._update_ratio_visibility(mode)
         self._on_changed()
 
     def _on_output_mode_changed(self, _idx: int) -> None:
@@ -397,6 +410,31 @@ class ExportSettingsForm(QWidget):
         self._print_container.setVisible(mode_value == ExportResolutionMode.PRINT.value)
         self._target_px_container.setVisible(mode_value == ExportResolutionMode.TARGET_PX.value)
 
+    def _update_ratio_visibility(self, mode_value: str | None = None) -> None:
+        """Paper ratio applies to print-style sizing; flat + Original hides it."""
+        if mode_value is None:
+            mode_value = self._current_mode_value()
+        if self._flat_mode and mode_value == ExportResolutionMode.ORIGINAL.value:
+            self._ratio_row_widget.setVisible(False)
+        else:
+            self._ratio_row_widget.setVisible(True)
+
+    def set_flat_mode(self, enabled: bool) -> None:
+        """Toggle flat-master export UI: hide delivery formats, adjust size rows."""
+        enabled = bool(enabled)
+        if enabled == self._flat_mode:
+            return
+        self._flat_mode = enabled
+        self._format_section.setVisible(not enabled)
+        if enabled:
+            self._update_ratio_visibility()
+        else:
+            self._on_fmt_changed(self.fmt_combo.currentText())
+            self._update_ratio_visibility()
+
+    def flat_mode(self) -> bool:
+        return self._flat_mode
+
     def _update_output_mode_visibility(self, mode) -> None:
         self._subfolder_container.setVisible(mode == ExportPresetOutputMode.SUBFOLDER_OF_SOURCE)
         self._abspath_container.setVisible(mode == ExportPresetOutputMode.ABSOLUTE)
@@ -424,6 +462,7 @@ class ExportSettingsForm(QWidget):
 
             self._select_mode_button(v["export_resolution_mode"])
             self._update_mode_visibility(v["export_resolution_mode"])
+            self._update_ratio_visibility(v["export_resolution_mode"])
             self.size_input.setValue(v["export_print_size"])
             self.dpi_input.setValue(v["export_dpi"])
             self.target_px_input.setValue(v["export_target_long_edge_px"])
