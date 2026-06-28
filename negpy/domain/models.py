@@ -382,14 +382,18 @@ def flat_master_config(config: WorkspaceConfig) -> WorkspaceConfig:
 
 def flat_export_config(export: ExportConfig, fmt: str = ExportFormat.TIFF) -> ExportConfig:
     """
-    Override export settings for a flat master: a high-bit-depth, full-resolution
-    file with no creative paper sizing. The export color space follows the user's
-    selection (unchanged here), same as the print path. ``fmt`` selects TIFF
-    (16-bit, default) or DNG (linear digital negative).
+    Override export settings for a flat master.
+
+    Always sets ``export_fmt`` (TIFF 16-bit or DNG). Resolution defaults to
+    full original size; if the user explicitly chose Print or Pixels sizing in
+    the export panel, those settings are honoured so flat masters can be
+    downscaled when requested.
     """
-    return replace(
-        export,
-        export_fmt=fmt,
-        export_resolution_mode=ExportResolutionMode.ORIGINAL.value,
-        paper_aspect_ratio=AspectRatio.ORIGINAL,
-    )
+    overrides: Dict[str, Any] = {"export_fmt": fmt}
+    if export.export_resolution_mode not in (
+        ExportResolutionMode.PRINT.value,
+        ExportResolutionMode.TARGET_PX.value,
+    ):
+        overrides["export_resolution_mode"] = ExportResolutionMode.ORIGINAL.value
+        overrides["paper_aspect_ratio"] = AspectRatio.ORIGINAL
+    return replace(export, **overrides)

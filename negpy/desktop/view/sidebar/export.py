@@ -222,7 +222,8 @@ class ExportSidebar(BaseSidebar):
         self.layout.addLayout(peek_bake_row)
 
         self.flat_hint_label = QLabel(
-            "Exports a flat master in the selected color space. The size row above is overridden for this output."
+            "Exports a flat master in the selected color space at full resolution by default. "
+            "Choose Print or Pixels above to downscale."
         )
         self.flat_hint_label.setWordWrap(True)
         self.flat_hint_label.setStyleSheet(f"color: {THEME.text_muted}; font-size: 10px;")

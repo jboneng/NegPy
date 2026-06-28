@@ -28,6 +28,7 @@ from negpy.domain.models import (
     ExportFormat,
     ExportPreset,
     ExportPresetOutputMode,
+    ExportResolutionMode,
     WorkspaceConfig,
     flat_export_config,
     flat_master_config,
@@ -1242,6 +1243,19 @@ class AppController(QObject):
             return
         self.state.flat_output = enabled
         self.session.save_flat_output_prefs()
+        # Flat masters default to full resolution; only honour Print/Pixels when the
+        # user explicitly selects those modes in the export panel.
+        if enabled and self.state.config.export.export_resolution_mode == ExportResolutionMode.PRINT.value:
+            self.session.update_config(
+                replace(
+                    self.state.config,
+                    export=replace(
+                        self.state.config.export,
+                        export_resolution_mode=ExportResolutionMode.ORIGINAL.value,
+                    ),
+                ),
+                persist=True,
+            )
         self.flat_output_changed.emit(enabled)
         # If a peek is active and flat output was turned off, drop back to the edit.
         if not enabled and self.state.flat_peek:

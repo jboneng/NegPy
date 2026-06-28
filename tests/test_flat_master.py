@@ -190,7 +190,10 @@ class TestFlatConfigHelpers(unittest.TestCase):
 
     def test_flat_export_config_full_res_preserves_color_space(self):
         # Color space follows the user's export selection; flat must not override it.
-        src = ExportConfig(export_color_space=ColorSpace.SRGB.value)
+        src = ExportConfig(
+            export_color_space=ColorSpace.SRGB.value,
+            export_resolution_mode=ExportResolutionMode.ORIGINAL.value,
+        )
         out = flat_export_config(src, fmt=ExportFormat.TIFF)
         self.assertEqual(out.export_fmt, ExportFormat.TIFF)
         self.assertEqual(out.export_color_space, ColorSpace.SRGB.value)
@@ -201,9 +204,50 @@ class TestFlatConfigHelpers(unittest.TestCase):
         self.assertEqual(out.export_resolution_mode, ExportResolutionMode.ORIGINAL.value)
         self.assertEqual(out.paper_aspect_ratio, AspectRatio.ORIGINAL)
 
+    def test_flat_export_config_honours_target_px(self):
+        src = ExportConfig(
+            export_resolution_mode=ExportResolutionMode.TARGET_PX.value,
+            export_target_long_edge_px=6000,
+            paper_aspect_ratio=AspectRatio.R_3_2,
+        )
+        out = flat_export_config(src, fmt=ExportFormat.TIFF)
+        self.assertEqual(out.export_resolution_mode, ExportResolutionMode.TARGET_PX.value)
+        self.assertEqual(out.export_target_long_edge_px, 6000)
+        self.assertEqual(out.paper_aspect_ratio, AspectRatio.R_3_2)
+
+    def test_flat_export_config_honours_print_mode(self):
+        src = ExportConfig(
+            export_resolution_mode=ExportResolutionMode.PRINT.value,
+            export_print_size=24.0,
+            export_dpi=360,
+            paper_aspect_ratio=AspectRatio.R_5_4,
+        )
+        out = flat_export_config(src, fmt=ExportFormat.TIFF)
+        self.assertEqual(out.export_resolution_mode, ExportResolutionMode.PRINT.value)
+        self.assertEqual(out.export_print_size, 24.0)
+        self.assertEqual(out.export_dpi, 360)
+        self.assertEqual(out.paper_aspect_ratio, AspectRatio.R_5_4)
+
     def test_flat_export_config_dng(self):
         out = flat_export_config(ExportConfig(), fmt=ExportFormat.DNG)
         self.assertEqual(out.export_fmt, ExportFormat.DNG)
+
+    def test_flat_export_target_px_resizes_via_print_service(self):
+        """Regression: flat export must not discard Pixels sizing (e.g. 6000px long edge)."""
+        from negpy.services.export.print import PrintService
+
+        img = np.zeros((5333, 8000, 3), dtype=np.float32)
+        export = flat_export_config(
+            ExportConfig(
+                export_resolution_mode=ExportResolutionMode.TARGET_PX.value,
+                export_target_long_edge_px=6000,
+            ),
+            fmt=ExportFormat.TIFF,
+        )
+        result, _ = PrintService.apply_layout(img, export)
+        self.assertEqual(max(result.shape[:2]), 6000)
+        self.assertEqual(result.shape[1], 6000)
+        self.assertAlmostEqual(result.shape[0] / result.shape[1], 5333 / 8000, places=2)
 
 
 class TestRenderIntentSerialization(unittest.TestCase):
