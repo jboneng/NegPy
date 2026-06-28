@@ -223,7 +223,7 @@ class ExportSidebar(BaseSidebar):
 
         self.flat_hint_label = QLabel(
             "Exports a flat master in the selected color space at full resolution by default. "
-            "Choose Print or Pixels above to downscale."
+            "Choose Print or Pixels below to downscale."
         )
         self.flat_hint_label.setWordWrap(True)
         self.flat_hint_label.setStyleSheet(f"color: {THEME.text_muted}; font-size: 10px;")
