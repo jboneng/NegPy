@@ -3,6 +3,7 @@
 ## 0.30.2
 
 - **Cast Removal — cleaner highlights** — the per-channel gray balance now anchors a third (highlight) reference, fitting a curve through highlight/midtone/shadow instead of a line. Fixes highlights occasionally overcorrecting past neutral (toward magenta) under 0.30.1.
+- **More bundled crosstalk profiles** — additional Lab Crosstalk matrices for common film stocks, derived from official datasheets. @jboneng
 
 ## 0.30.1
 
