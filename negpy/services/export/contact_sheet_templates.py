@@ -68,7 +68,6 @@ class ContactSheetTemplates:
             if parsed is None:
                 continue
             name, layout = parsed
-            name = name or fname[:-5]
             if name != DEFAULT_NAME:
                 result[name] = layout
         return result
@@ -88,7 +87,10 @@ class ContactSheetTemplates:
                 max_tiles=_clamp_int(layout_data.get("max_tiles"), *_MAX_TILES_RANGE, MAX_TILES_PER_SHEET),
             )
             raw_name = data.get("name")
-            name = raw_name.strip() if isinstance(raw_name, str) and raw_name.strip() else None
+            if isinstance(raw_name, str) and raw_name.strip():
+                name = raw_name.strip()
+            else:
+                name = os.path.splitext(os.path.basename(path))[0]
             return name, layout
         except Exception:
             return None
