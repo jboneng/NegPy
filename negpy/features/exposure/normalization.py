@@ -367,7 +367,7 @@ def analyze_log_exposure_bounds(
     # clip tightens channel balance / cast removal without touching the luma span.
     c_floors, c_ceils = _sample_log_bounds(img_log, color_clip, 0.0, process_mode, e6_normalize)
     mean_lf, mean_lc = sum(floors) / 3.0, sum(ceils) / 3.0
-    mean_cf, mean_cc = sum(c_floors) / 3.0, sum(c_ceils) / 3.0
+    mean_cf, mean_cc = sorted(c_floors)[1], sorted(c_ceils)[1]
     floors = [mean_lf + (c_floors[ch] - mean_cf) for ch in range(3)]
     ceils = [mean_lc + (c_ceils[ch] - mean_cc) for ch in range(3)]
 
@@ -379,26 +379,60 @@ def analyze_log_exposure_bounds(
 
 def mix_luma_colour_bounds(luma_src: LogNegativeBounds, colour_src: LogNegativeBounds) -> LogNegativeBounds:
     """
-    Luma centre+span from one bounds, per-channel colour deviation from another.
-    Identity when luma_src is colour_src — mirrors analyze_log_exposure_bounds' recombination.
+    Luma-weighted centre+range from one bounds, per-channel colour cast from
+    another. Keeps the colour source's per-channel shape but shifts it so the
+    result's luma-weighted centre and range (the brightness/anchor and the H&D
+    slope drivers — see luminance_density_range) match the luma source. So
+    colour-average moves only the per-channel cast, never contrast/brightness.
+    Identity when luma_src is colour_src (mirrors analyze_log_exposure_bounds'
+    recombination), which also keeps a persisted self-mix from stacking edits.
     """
-    mlf, mlc = sum(luma_src.floors) / 3.0, sum(luma_src.ceils) / 3.0
-    mcf, mcc = sum(colour_src.floors) / 3.0, sum(colour_src.ceils) / 3.0
-    floors = tuple(mlf + (colour_src.floors[ch] - mcf) for ch in range(3))
-    ceils = tuple(mlc + (colour_src.ceils[ch] - mcc) for ch in range(3))
-    return LogNegativeBounds(floors, ceils)
+    if luma_src == colour_src:
+        return luma_src
+    w = (LUMA_R, LUMA_G, LUMA_B)
+    centre = lambda b: sum(w[c] * (b.floors[c] + b.ceils[c]) / 2.0 for c in range(3))  # noqa: E731
+    rng = lambda b: sum(w[c] * (b.ceils[c] - b.floors[c]) for c in range(3))  # noqa: E731
+    dC = centre(luma_src) - centre(colour_src)
+    dR = rng(luma_src) - rng(colour_src)
+    df, dc = dC - dR / 2.0, dC + dR / 2.0
+    cf, cc = colour_src.floors, colour_src.ceils
+    return LogNegativeBounds(
+        (cf[0] + df, cf[1] + df, cf[2] + df),
+        (cc[0] + dc, cc[1] + dc, cc[2] + dc),
+    )
 
 
 def resolve_bounds(process, analyze_fn) -> LogNegativeBounds:
+    """Final bounds for rendering. See resolve_bounds_detailed for the per-frame base."""
+    return resolve_bounds_detailed(process, analyze_fn)[0]
+
+
+def resolve_bounds_detailed(process, analyze_fn) -> tuple[LogNegativeBounds, LogNegativeBounds]:
     """
-    Pick luma + colour bounds from the roll baseline (locked) or the per-frame
-    local/analyzed base, then mix. analyze_fn() supplies the per-frame base and is
-    called only when it is actually needed.
+    Returns (final, base): the final mixed bounds to render with, and the per-frame
+    base (local/analyzed) to persist. Persist the base, not the mix — re-feeding a
+    mix as the next base stacks edits (mean-vs-median drift; colour-only roll).
+    Picks luma + colour from the roll baseline (locked) or the per-frame base, then
+    mixes. analyze_fn() supplies the base and is called only when actually needed.
     """
     roll_luma = process.use_luma_average and process.is_locked_initialized
     roll_colour = process.use_colour_average and process.is_locked_initialized
     locked = LogNegativeBounds(process.locked_floors, process.locked_ceils)
     if roll_luma and roll_colour:
-        return locked
+        return locked, locked
     base = LogNegativeBounds(process.local_floors, process.local_ceils) if process.is_local_initialized else analyze_fn()
-    return mix_luma_colour_bounds(locked if roll_luma else base, locked if roll_colour else base)
+    final = mix_luma_colour_bounds(locked if roll_luma else base, locked if roll_colour else base)
+    return final, base
+
+
+def luma_source_bounds(process, base: LogNegativeBounds) -> LogNegativeBounds:
+    """
+    Bounds the luma/exposure reading (metered anchor) must come from: the roll
+    baseline when luma-average is on, else the per-frame base. The anchor is a
+    luma-weighted percentile and so reacts non-linearly to the per-channel cast;
+    measuring it here, not on the final mix, keeps brightness independent of the
+    colour-average toggle (mix_luma_colour_bounds already pins centre+range).
+    """
+    if process.use_luma_average and process.is_locked_initialized:
+        return LogNegativeBounds(process.locked_floors, process.locked_ceils)
+    return base

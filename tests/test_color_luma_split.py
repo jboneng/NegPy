@@ -9,6 +9,7 @@ from negpy.features.exposure.normalization import (
     analyze_log_exposure_bounds,
     mix_luma_colour_bounds,
     resolve_bounds,
+    resolve_bounds_detailed,
 )
 from negpy.features.process.models import ProcessConfig
 
@@ -98,6 +99,29 @@ class TestResolveBounds(unittest.TestCase):
         """Mixing a bounds with itself is the identity."""
         self._assert_close(mix_luma_colour_bounds(self.LOCKED, self.LOCKED), self.LOCKED)
 
+    def test_mix_identity_asymmetric(self):
+        """Identity must hold for asymmetric channels too (mean != median), else a
+        mix(base, base) drifts and stacks when its result is persisted and re-fed."""
+        # floors mean (-1.45) != median (-1.5); ceils mean (-0.4) != median (-0.5).
+        asym = LogNegativeBounds((-1.5, -1.5, -1.35), (-0.5, -0.5, -0.2))
+        self._assert_close(mix_luma_colour_bounds(asym, asym), asym)
+
+    def test_no_roll_resolve_is_stable_when_fed_back(self):
+        """resolve_bounds with no roll baseline must return the local base unchanged,
+        so persisting it and re-resolving doesn't accumulate (the edit-stacking bug)."""
+        asym = LogNegativeBounds((-1.5, -1.5, -1.35), (-0.5, -0.5, -0.2))
+        proc = replace(
+            ProcessConfig(),
+            use_luma_average=False,
+            use_colour_average=False,
+            local_floors=asym.floors,
+            local_ceils=asym.ceils,
+        )
+        first = resolve_bounds(proc, self._boom)
+        proc2 = replace(proc, local_floors=first.floors, local_ceils=first.ceils)
+        second = resolve_bounds(proc2, self._boom)
+        self._assert_close(first, second)
+
     def test_both_on_uses_locked(self):
         proc = self._proc(use_luma_average=True, use_colour_average=True)
         self._assert_close(resolve_bounds(proc, self._boom), self.LOCKED)
@@ -113,6 +137,67 @@ class TestResolveBounds(unittest.TestCase):
     def test_colour_only_mixes_local_luma_with_locked_colour(self):
         proc = self._proc(use_luma_average=False, use_colour_average=True)
         self._assert_close(resolve_bounds(proc, self._boom), mix_luma_colour_bounds(self.LOCAL, self.LOCKED))
+
+    def test_detailed_returns_per_frame_base(self):
+        """resolve_bounds_detailed exposes the per-frame base alongside the final mix —
+        the base is what must be persisted (persisting the mix drifts)."""
+        proc = self._proc(use_luma_average=False, use_colour_average=True)
+        final, base = resolve_bounds_detailed(proc, self._boom)
+        self._assert_close(base, self.LOCAL)
+        self._assert_close(final, mix_luma_colour_bounds(self.LOCAL, self.LOCKED))
+
+    def test_persisting_base_is_stable_colour_only_roll(self):
+        """Colour-only roll with an asymmetric baseline: persisting the per-frame base
+        and re-feeding it must not accumulate (the residual edit-stacking path)."""
+        locked = LogNegativeBounds((-2.0, -2.0, -1.7), (-0.3, -0.3, -0.05))
+        local = LogNegativeBounds((-1.5, -1.4, -1.2), (-0.6, -0.5, -0.4))
+        proc = replace(
+            ProcessConfig(),
+            use_luma_average=False,
+            use_colour_average=True,
+            locked_floors=locked.floors,
+            locked_ceils=locked.ceils,
+            local_floors=local.floors,
+            local_ceils=local.ceils,
+        )
+        _, base = resolve_bounds_detailed(proc, self._boom)
+        proc2 = replace(proc, local_floors=base.floors, local_ceils=base.ceils)
+        _, base2 = resolve_bounds_detailed(proc2, self._boom)
+        self._assert_close(base, base2)
+
+    def test_colour_source_does_not_move_luma_range_or_centre(self):
+        """The user's bug: swapping the colour source must not change the
+        luma-weighted density range (H&D slope -> gamma) or centre (-> brightness),
+        which only the luma source may set."""
+        from negpy.features.exposure.normalization import LUMA_R, LUMA_G, LUMA_B, luminance_density_range
+
+        w = (LUMA_R, LUMA_G, LUMA_B)
+        centre = lambda b: sum(w[c] * (b.floors[c] + b.ceils[c]) / 2.0 for c in range(3))  # noqa: E731
+        for luma_src, colour_src in ((self.LOCAL, self.LOCKED), (self.LOCKED, self.LOCAL)):
+            mixed = mix_luma_colour_bounds(luma_src, colour_src)
+            self.assertAlmostEqual(luminance_density_range(mixed), luminance_density_range(luma_src), places=6)
+            self.assertAlmostEqual(centre(mixed), centre(luma_src), places=6)
+        # And the cast still differs from the luma source (colour actually applied).
+        self.assertNotAlmostEqual(
+            mix_luma_colour_bounds(self.LOCAL, self.LOCKED).floors[0],
+            self.LOCAL.floors[0],
+            places=4,
+        )
+
+    def test_luma_source_bounds_ignores_colour_average(self):
+        """The metered anchor (brightness) is read off these bounds, so they must
+        depend only on the luma axis — toggling colour-average never moves them."""
+        from negpy.features.exposure.normalization import luma_source_bounds
+
+        off = self._proc(use_luma_average=False, use_colour_average=False)
+        colour_on = self._proc(use_luma_average=False, use_colour_average=True)
+        self._assert_close(luma_source_bounds(off, self.LOCAL), self.LOCAL)
+        self._assert_close(luma_source_bounds(colour_on, self.LOCAL), self.LOCAL)
+        # Luma-average on -> roll baseline, still independent of the colour toggle.
+        luma_both = self._proc(use_luma_average=True, use_colour_average=True)
+        luma_only = self._proc(use_luma_average=True, use_colour_average=False)
+        self._assert_close(luma_source_bounds(luma_both, self.LOCAL), self.LOCKED)
+        self._assert_close(luma_source_bounds(luma_only, self.LOCAL), self.LOCKED)
 
     def test_falls_back_to_analyze_when_locked_uninitialized(self):
         """Flags on but no roll baseline -> the per-frame analyze_fn supplies the base."""

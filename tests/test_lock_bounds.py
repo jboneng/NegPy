@@ -303,29 +303,38 @@ class TestRenderWritebackRespectsLock(unittest.TestCase):
     def test_writeback_skips_when_ephemeral(self):
         # Splash (embedded-JPEG) first-paint render must not persist its bounds.
         _set_process(self.ctrl, local_floors=(0.0, 0.0, 0.0), local_ceils=(0.0, 0.0, 0.0), lock_bounds=False)
-        self.ctrl._on_metrics_updated(
-            {"log_bounds": FakeBounds((0.1, 0.1, 0.1), (0.9, 0.9, 0.9)), "ephemeral": True}
-        )
+        self.ctrl._on_metrics_updated({"log_bounds": FakeBounds((0.1, 0.1, 0.1), (0.9, 0.9, 0.9)), "ephemeral": True})
         self.ctrl.session.update_config.assert_not_called()
 
     def test_writeback_skips_when_source_hash_mismatch(self):
         # Late metric from a different file (fast switch) must not poison the current file.
         _set_process(self.ctrl, local_floors=(0.0, 0.0, 0.0), local_ceils=(0.0, 0.0, 0.0), lock_bounds=False)
-        self.ctrl._on_metrics_updated(
-            {"log_bounds": FakeBounds((0.1, 0.1, 0.1), (0.9, 0.9, 0.9)), "source_hash": "other_file"}
-        )
+        self.ctrl._on_metrics_updated({"log_bounds": FakeBounds((0.1, 0.1, 0.1), (0.9, 0.9, 0.9)), "source_hash": "other_file"})
         self.ctrl.session.update_config.assert_not_called()
 
     def test_writeback_runs_when_source_hash_matches(self):
         _set_process(self.ctrl, local_floors=(0.0, 0.0, 0.0), local_ceils=(0.0, 0.0, 0.0), lock_bounds=False)
         new_floors = (0.05, 0.06, 0.07)
         new_ceils = (0.91, 0.92, 0.93)
-        self.ctrl._on_metrics_updated(
-            {"log_bounds": FakeBounds(new_floors, new_ceils), "source_hash": self.ctrl.state.current_file_hash}
-        )
+        self.ctrl._on_metrics_updated({"log_bounds": FakeBounds(new_floors, new_ceils), "source_hash": self.ctrl.state.current_file_hash})
         proc = _saved_process(self.ctrl)
         self.assertEqual(proc.local_floors, new_floors)
         self.assertEqual(proc.local_ceils, new_ceils)
+
+    def test_writeback_persists_base_not_mixed(self):
+        # Persist the per-frame base, never the final mix — persisting the mix and
+        # re-feeding it drifts (the colour-only-roll edit-stacking residual).
+        _set_process(self.ctrl, local_floors=(0.0, 0.0, 0.0), local_ceils=(0.0, 0.0, 0.0), lock_bounds=False)
+        base = ((0.05, 0.06, 0.07), (0.91, 0.92, 0.93))
+        self.ctrl._on_metrics_updated(
+            {
+                "log_bounds": FakeBounds((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),  # mixed — must be ignored
+                "log_bounds_base": FakeBounds(*base),
+            }
+        )
+        proc = _saved_process(self.ctrl)
+        self.assertEqual(proc.local_floors, base[0])
+        self.assertEqual(proc.local_ceils, base[1])
 
 
 if __name__ == "__main__":
