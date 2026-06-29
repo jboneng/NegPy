@@ -68,6 +68,7 @@ Passed through every stage. Carries `scale_factor` (preview downsample ratio), `
 - **Workers** — heavy work (render, export, thumbnails) runs in `QThread`-backed worker objects in `negpy/desktop/workers/`; communicate via Qt signals
 - **Sidebars** — each feature has a `negpy/desktop/view/sidebar/<name>.py` that reads from `AppState` and calls controller methods; all synced via `ControlsPanel._sync_all_sidebars()` on `config_updated`
 - **Contact sheet output** — `ExportConfig.contact_sheet_output_path` (persisted via `last_export_config` sticky). Empty = follow export destination rules (same-as-source → first visible frame's folder; absolute → `export_path`). Non-empty path wins on export.
+- **Contact sheet templates** — `.toml` files in `~/NegPy/contact_sheets/` (`ContactSheetTemplates`). `ExportConfig.contact_sheet_template` stores the selected name; **Default** uses `contact_sheet_default_*` snapshot fields. Edits to layout spinboxes write back to the active template. See `docs/CONTACT_SHEET_TEMPLATES.md`.
 
 ### Adding a new feature
 

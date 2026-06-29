@@ -88,6 +88,20 @@ class TestDesktopSessionSync(unittest.TestCase):
         self.assertEqual(config.export.contact_sheet_output_path, "/saved/contact")
         self.assertEqual(config.export.contact_sheet_cell_px, 800)
 
+    def test_contact_sheet_template_in_sticky_export(self):
+        sticky = {
+            "last_export_config": {
+                "contact_sheet_template": "Tight 35mm",
+                "contact_sheet_cell_px": 400,
+                "contact_sheet_default_cell_px": 550,
+            },
+        }
+        self.mock_repo.get_global_setting.side_effect = lambda key, default=None: sticky.get(key, default)
+        config = self.session._apply_sticky_settings(WorkspaceConfig(), only_global=False)
+        self.assertEqual(config.export.contact_sheet_template, "Tight 35mm")
+        self.assertEqual(config.export.contact_sheet_cell_px, 400)
+        self.assertEqual(config.export.contact_sheet_default_cell_px, 550)
+
     def test_sync_selected_settings_exclusions(self):
         source_config = WorkspaceConfig(
             exposure=replace(WorkspaceConfig().exposure, density=1.5),

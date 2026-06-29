@@ -1,3 +1,5 @@
+import os
+
 import qtawesome as qta
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -6,8 +8,10 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -20,6 +24,7 @@ from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
 from negpy.desktop.view.widgets.export_settings_form import ExportSettingsForm, constrain_combo
 from negpy.domain.models import ColorSpace
+from negpy.services.export.contact_sheet_templates import ContactSheetLayout, ContactSheetTemplates
 
 
 class ExportSidebar(BaseSidebar):
@@ -77,6 +82,8 @@ class ExportSidebar(BaseSidebar):
             lambda: self.controller.request_batch_export(override_settings=self.apply_all_btn.isChecked())
         )
         self.contact_sheet_btn.clicked.connect(self.controller.request_contact_sheet)
+        self.cs_save_template_btn.clicked.connect(self._on_save_contact_sheet_template)
+        self.cs_template_combo.currentTextChanged.connect(self._on_contact_sheet_template_changed)
 
     # --- Presets -------------------------------------------------------------
 
@@ -124,11 +131,32 @@ class ExportSidebar(BaseSidebar):
     def _add_contact_sheet_section(self) -> None:
         """Collapsible CONTACT SHEET section: layout settings + the render button."""
         conf = self.state.config.export
+        self._cs_syncing = False
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(6)
+
+        template_row = QHBoxLayout()
+        template_label = QLabel("Template")
+        template_label.setFixedWidth(90)
+        template_row.addWidget(template_label)
+        self.cs_template_combo = QComboBox()
+        constrain_combo(self.cs_template_combo)
+        self.cs_template_combo.setToolTip(
+            "Layout preset from .toml files in NegPy/contact_sheets (see docs/CONTACT_SHEET_TEMPLATES.md). "
+            "Edits to the spinboxes below are saved to the active template."
+        )
+        template_row.addWidget(self.cs_template_combo)
+        content_layout.addLayout(template_row)
+
+        self.cs_save_template_btn = QPushButton(" Save as template")
+        self.cs_save_template_btn.setIcon(qta.icon("fa5s.save", color=THEME.text_primary))
+        self.cs_save_template_btn.setToolTip("Save the current layout as a new named template file")
+        content_layout.addWidget(self.cs_save_template_btn)
+
+        initial_layout = self._contact_sheet_layout_for_config(conf)
 
         def _labeled_spinbox(label: str, value: int, lo: int, hi: int) -> QSpinBox:
             row = QHBoxLayout()
@@ -136,15 +164,22 @@ class ExportSidebar(BaseSidebar):
             spin = QSpinBox()
             spin.setRange(lo, hi)
             spin.setValue(value)
-            spin.valueChanged.connect(lambda _: self.update_timer.start())
+            spin.valueChanged.connect(self._on_contact_sheet_layout_changed)
             row.addWidget(spin)
             content_layout.addLayout(row)
             return spin
 
-        self.cs_cell_px_input = _labeled_spinbox("Cell px", conf.contact_sheet_cell_px, 100, 4000)
-        self.cs_gap_input = _labeled_spinbox("Gap px", conf.contact_sheet_gap, 0, 200)
-        self.cs_margin_input = _labeled_spinbox("Margin px", conf.contact_sheet_margin, 0, 500)
-        self.cs_max_tiles_input = _labeled_spinbox("Max tiles", conf.contact_sheet_max_tiles, 1, 200)
+        self.cs_cell_px_input = _labeled_spinbox("Cell px", initial_layout.cell_px, 100, 4000)
+        self.cs_gap_input = _labeled_spinbox("Gap px", initial_layout.gap, 0, 200)
+        self.cs_margin_input = _labeled_spinbox("Margin px", initial_layout.margin, 0, 500)
+        self.cs_max_tiles_input = _labeled_spinbox("Max tiles", initial_layout.max_tiles, 1, 200)
+
+        self._refresh_contact_sheet_templates()
+        saved_template = conf.contact_sheet_template.strip()
+        if saved_template and saved_template in ContactSheetTemplates.list_templates():
+            self.cs_template_combo.setCurrentText(saved_template)
+        else:
+            self.cs_template_combo.setCurrentText(ContactSheetTemplates.DEFAULT_NAME)
 
         cs_path_row = QHBoxLayout()
         cs_path_label = QLabel("Path")
@@ -186,7 +221,153 @@ class ExportSidebar(BaseSidebar):
         if path:
             self.cs_output_path_edit.setText(path)
 
-    # --- Flat master ("for editing elsewhere") -------------------------------
+    def _contact_sheet_layout_for_config(self, conf) -> ContactSheetLayout:
+        saved_template = conf.contact_sheet_template.strip()
+        if saved_template and saved_template in ContactSheetTemplates.list_templates():
+            layout = ContactSheetTemplates.get_layout(saved_template)
+            if layout is not None:
+                return layout
+        return ContactSheetTemplates.default_layout_from_export(conf)
+
+    def _refresh_contact_sheet_templates(self) -> None:
+        profiles = ContactSheetTemplates.list_templates()
+        if profiles != [self.cs_template_combo.itemText(i) for i in range(self.cs_template_combo.count())]:
+            current = self.cs_template_combo.currentText()
+            self.cs_template_combo.blockSignals(True)
+            self.cs_template_combo.clear()
+            self.cs_template_combo.addItems(profiles)
+            idx = self.cs_template_combo.findText(current)
+            self.cs_template_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.cs_template_combo.blockSignals(False)
+
+    def _current_contact_sheet_layout(self) -> ContactSheetLayout:
+        return ContactSheetLayout(
+            cell_px=self.cs_cell_px_input.value(),
+            gap=self.cs_gap_input.value(),
+            margin=self.cs_margin_input.value(),
+            max_tiles=self.cs_max_tiles_input.value(),
+        )
+
+    def _apply_contact_sheet_layout(self, layout: ContactSheetLayout) -> None:
+        self._cs_syncing = True
+        try:
+            self.cs_cell_px_input.setValue(layout.cell_px)
+            self.cs_gap_input.setValue(layout.gap)
+            self.cs_margin_input.setValue(layout.margin)
+            self.cs_max_tiles_input.setValue(layout.max_tiles)
+        finally:
+            self._cs_syncing = False
+
+    def _contact_sheet_template_name(self) -> str:
+        name = self.cs_template_combo.currentText()
+        if name == ContactSheetTemplates.DEFAULT_NAME:
+            return ""
+        return name
+
+    def _on_contact_sheet_layout_changed(self, _value: int) -> None:
+        if self._cs_syncing:
+            return
+        self.update_timer.start()
+
+    def _sync_active_contact_sheet_template(self) -> None:
+        """Write spinbox layout back to the active template (Default snapshot or .toml file)."""
+        if self._cs_syncing:
+            return
+        layout = self._current_contact_sheet_layout()
+        template_name = self._contact_sheet_template_name()
+        if template_name:
+            try:
+                ContactSheetTemplates.save(template_name, layout)
+            except OSError as exc:
+                QMessageBox.critical(
+                    self,
+                    "Contact Sheet Template",
+                    f'Could not update template "{template_name}":\n{exc}',
+                )
+                return
+
+    def _contact_sheet_persist_kwargs(self) -> dict:
+        layout = self._current_contact_sheet_layout()
+        template_name = self._contact_sheet_template_name()
+        kwargs = {
+            **ContactSheetTemplates.active_layout_field_updates(layout),
+            "contact_sheet_output_path": self.cs_output_path_edit.text(),
+            "contact_sheet_template": template_name,
+        }
+        if not template_name:
+            kwargs.update(ContactSheetTemplates.default_layout_field_updates(layout))
+        return kwargs
+
+    def _on_contact_sheet_template_changed(self, name: str) -> None:
+        if self._cs_syncing:
+            return
+        if name == ContactSheetTemplates.DEFAULT_NAME:
+            layout = ContactSheetTemplates.default_layout_from_export(self.state.config.export)
+            self._apply_contact_sheet_layout(layout)
+            self.update_config_section(
+                "export",
+                persist=True,
+                render=False,
+                contact_sheet_template="",
+                **ContactSheetTemplates.active_layout_field_updates(layout),
+                **ContactSheetTemplates.default_layout_field_updates(layout),
+            )
+            return
+        layout = ContactSheetTemplates.get_layout(name)
+        if layout is None:
+            return
+        self._apply_contact_sheet_layout(layout)
+        self.update_config_section(
+            "export",
+            persist=True,
+            render=False,
+            contact_sheet_template=name,
+            **ContactSheetTemplates.active_layout_field_updates(layout),
+        )
+
+    def _on_save_contact_sheet_template(self) -> None:
+        current = self.cs_template_combo.currentText()
+        default_text = current if current != ContactSheetTemplates.DEFAULT_NAME else ""
+        name, ok = QInputDialog.getText(self, "Save Contact Sheet Template", "Template name:", text=default_text)
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if name == ContactSheetTemplates.DEFAULT_NAME:
+            QMessageBox.warning(self, "Save Contact Sheet Template", '"Default" is reserved. Choose another name.')
+            return
+
+        path = ContactSheetTemplates.path_for_name(name)
+        if os.path.exists(path) or ContactSheetTemplates.template_exists(name):
+            reply = QMessageBox.question(
+                self,
+                "Overwrite Template",
+                f'A template named "{name}" already exists. Replace it?',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        layout = self._current_contact_sheet_layout()
+        try:
+            ContactSheetTemplates.save(name, layout)
+        except OSError as exc:
+            QMessageBox.critical(self, "Save Contact Sheet Template", f"Could not write template:\n{exc}")
+            return
+
+        self._refresh_contact_sheet_templates()
+        self.cs_template_combo.blockSignals(True)
+        self.cs_template_combo.setCurrentText(name)
+        self.cs_template_combo.blockSignals(False)
+        self.update_config_section(
+            "export",
+            persist=True,
+            render=False,
+            contact_sheet_template=name,
+            **ContactSheetTemplates.active_layout_field_updates(layout),
+        )
 
     def _add_flat_master_section(self) -> None:
         """Output-intent override: Print (default) or Flat digital intermediate."""
@@ -471,6 +652,9 @@ class ExportSidebar(BaseSidebar):
         self.state.icc_output_path = vals["icc_output_path"]
         self.controller.session.save_icc_prefs()
 
+        self._sync_active_contact_sheet_template()
+        cs_kwargs = self._contact_sheet_persist_kwargs()
+
         self.update_config_section(
             "export",
             persist=True,
@@ -494,11 +678,7 @@ class ExportSidebar(BaseSidebar):
             export_path=vals["output_path"],
             filename_pattern=vals["filename_pattern"],
             overwrite=vals["overwrite"],
-            contact_sheet_cell_px=self.cs_cell_px_input.value(),
-            contact_sheet_gap=self.cs_gap_input.value(),
-            contact_sheet_margin=self.cs_margin_input.value(),
-            contact_sheet_max_tiles=self.cs_max_tiles_input.value(),
-            contact_sheet_output_path=self.cs_output_path_edit.text(),
+            **cs_kwargs,
         )
 
     def _on_display_changed(self, index: int) -> None:
@@ -547,11 +727,18 @@ class ExportSidebar(BaseSidebar):
             override = self.state.monitor_profile_override
             self.display_combo.setCurrentText(override if override in self.display_spaces else "As detected")
             self._refresh_display_info()
-            self.cs_cell_px_input.setValue(conf.contact_sheet_cell_px)
-            self.cs_gap_input.setValue(conf.contact_sheet_gap)
-            self.cs_margin_input.setValue(conf.contact_sheet_margin)
-            self.cs_max_tiles_input.setValue(conf.contact_sheet_max_tiles)
+            layout = self._contact_sheet_layout_for_config(conf)
+            self.cs_cell_px_input.setValue(layout.cell_px)
+            self.cs_gap_input.setValue(layout.gap)
+            self.cs_margin_input.setValue(layout.margin)
+            self.cs_max_tiles_input.setValue(layout.max_tiles)
             self.cs_output_path_edit.setText(conf.contact_sheet_output_path)
+            self._refresh_contact_sheet_templates()
+            saved_template = conf.contact_sheet_template.strip()
+            if saved_template and saved_template in ContactSheetTemplates.list_templates():
+                self.cs_template_combo.setCurrentText(saved_template)
+            else:
+                self.cs_template_combo.setCurrentText(ContactSheetTemplates.DEFAULT_NAME)
             if self.state.flat_output:
                 self.intent_flat_btn.setChecked(True)
             else:
@@ -577,6 +764,7 @@ class ExportSidebar(BaseSidebar):
             self.cs_margin_input,
             self.cs_max_tiles_input,
             self.cs_output_path_edit,
+            self.cs_template_combo,
             self.flat_format_combo,
             self.flat_peek_btn,
         ]

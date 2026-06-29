@@ -125,6 +125,11 @@ class ExportConfig:
     contact_sheet_margin: int = 32
     contact_sheet_max_tiles: int = 38
     contact_sheet_output_path: str = ""  # empty = follow export destination rules
+    contact_sheet_template: str = ""  # empty = Default template active
+    contact_sheet_default_cell_px: int = 600
+    contact_sheet_default_gap: int = 16
+    contact_sheet_default_margin: int = 32
+    contact_sheet_default_max_tiles: int = 38
 
 
 @dataclass
