@@ -77,6 +77,17 @@ class TestDesktopSessionSync(unittest.TestCase):
         config = self.session._apply_sticky_settings(base, only_global=True)
         self.assertFalse(config.exposure.auto_exposure)
 
+    def test_contact_sheet_output_path_in_sticky_export(self):
+        from negpy.domain.models import ExportConfig
+
+        sticky = {
+            "last_export_config": {"contact_sheet_output_path": "/saved/contact", "contact_sheet_cell_px": 800},
+        }
+        self.mock_repo.get_global_setting.side_effect = lambda key, default=None: sticky.get(key, default)
+        config = self.session._apply_sticky_settings(WorkspaceConfig(), only_global=False)
+        self.assertEqual(config.export.contact_sheet_output_path, "/saved/contact")
+        self.assertEqual(config.export.contact_sheet_cell_px, 800)
+
     def test_sync_selected_settings_exclusions(self):
         source_config = WorkspaceConfig(
             exposure=replace(WorkspaceConfig().exposure, density=1.5),

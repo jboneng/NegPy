@@ -124,6 +124,7 @@ class ExportConfig:
     contact_sheet_gap: int = 16
     contact_sheet_margin: int = 32
     contact_sheet_max_tiles: int = 38
+    contact_sheet_output_path: str = ""  # empty = follow export destination rules
 
 
 @dataclass

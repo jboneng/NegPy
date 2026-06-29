@@ -4,8 +4,10 @@ from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -144,6 +146,26 @@ class ExportSidebar(BaseSidebar):
         self.cs_margin_input = _labeled_spinbox("Margin px", conf.contact_sheet_margin, 0, 500)
         self.cs_max_tiles_input = _labeled_spinbox("Max tiles", conf.contact_sheet_max_tiles, 1, 200)
 
+        cs_path_row = QHBoxLayout()
+        cs_path_label = QLabel("Path")
+        cs_path_label.setFixedWidth(90)
+        cs_path_row.addWidget(cs_path_label)
+        self.cs_output_path_edit = QLineEdit(conf.contact_sheet_output_path)
+        self.cs_output_path_edit.setPlaceholderText("Uses export destination")
+        self.cs_output_path_edit.setToolTip(
+            "Folder for contact sheet JPEGs. Leave empty to follow the export destination "
+            "(same as source or absolute export path)."
+        )
+        self.cs_output_path_edit.textChanged.connect(lambda _: self.update_timer.start())
+        self.cs_output_path_browse_btn = QPushButton()
+        self.cs_output_path_browse_btn.setIcon(qta.icon("fa5s.folder-open", color=THEME.text_primary))
+        self.cs_output_path_browse_btn.setFixedWidth(40)
+        self.cs_output_path_browse_btn.setToolTip("Choose contact sheet output folder")
+        self.cs_output_path_browse_btn.clicked.connect(self._browse_contact_sheet_output_path)
+        cs_path_row.addWidget(self.cs_output_path_edit)
+        cs_path_row.addWidget(self.cs_output_path_browse_btn)
+        content_layout.addLayout(cs_path_row)
+
         self.contact_sheet_btn = QPushButton(" Export contact sheet")
         self.contact_sheet_btn.setObjectName("contact_sheet_btn")
         self.contact_sheet_btn.setFixedHeight(40)
@@ -157,6 +179,12 @@ class ExportSidebar(BaseSidebar):
         section.set_content(content)
         section.expanded_changed.connect(lambda checked: repo.save_global_setting("section_expanded_contact_sheet", checked))
         self.layout.addWidget(section)
+
+    def _browse_contact_sheet_output_path(self) -> None:
+        start = self.cs_output_path_edit.text().strip() or self.state.config.export.export_path
+        path = QFileDialog.getExistingDirectory(self, "Select Contact Sheet Output Folder", start)
+        if path:
+            self.cs_output_path_edit.setText(path)
 
     # --- Flat master ("for editing elsewhere") -------------------------------
 
@@ -470,6 +498,7 @@ class ExportSidebar(BaseSidebar):
             contact_sheet_gap=self.cs_gap_input.value(),
             contact_sheet_margin=self.cs_margin_input.value(),
             contact_sheet_max_tiles=self.cs_max_tiles_input.value(),
+            contact_sheet_output_path=self.cs_output_path_edit.text(),
         )
 
     def _on_display_changed(self, index: int) -> None:
@@ -522,6 +551,7 @@ class ExportSidebar(BaseSidebar):
             self.cs_gap_input.setValue(conf.contact_sheet_gap)
             self.cs_margin_input.setValue(conf.contact_sheet_margin)
             self.cs_max_tiles_input.setValue(conf.contact_sheet_max_tiles)
+            self.cs_output_path_edit.setText(conf.contact_sheet_output_path)
             if self.state.flat_output:
                 self.intent_flat_btn.setChecked(True)
             else:
@@ -546,6 +576,7 @@ class ExportSidebar(BaseSidebar):
             self.cs_gap_input,
             self.cs_margin_input,
             self.cs_max_tiles_input,
+            self.cs_output_path_edit,
             self.flat_format_combo,
             self.flat_peek_btn,
         ]

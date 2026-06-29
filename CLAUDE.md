@@ -67,6 +67,7 @@ Passed through every stage. Carries `scale_factor` (preview downsample ratio), `
 - **`AppController`** (`negpy/desktop/controller.py`) — single controller; all UI interactions call methods here; emits `config_updated` and `image_updated` signals
 - **Workers** — heavy work (render, export, thumbnails) runs in `QThread`-backed worker objects in `negpy/desktop/workers/`; communicate via Qt signals
 - **Sidebars** — each feature has a `negpy/desktop/view/sidebar/<name>.py` that reads from `AppState` and calls controller methods; all synced via `ControlsPanel._sync_all_sidebars()` on `config_updated`
+- **Contact sheet output** — `ExportConfig.contact_sheet_output_path` (persisted via `last_export_config` sticky). Empty = follow export destination rules (same-as-source → first visible frame's folder; absolute → `export_path`). Non-empty path wins on export.
 
 ### Adding a new feature
 

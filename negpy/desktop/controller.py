@@ -1569,19 +1569,24 @@ class AppController(QObject):
         if tasks:
             self._run_export_tasks(tasks)
 
+    def _contact_sheet_output_dir(self, visible_files: list) -> Optional[str]:
+        """Resolve the contact sheet output folder (custom path or export destination rules)."""
+        custom = self.state.config.export.contact_sheet_output_path.strip()
+        if custom:
+            return custom
+        if self.state.config.export.output_mode == ExportPresetOutputMode.SAME_AS_SOURCE:
+            return os.path.dirname(visible_files[0]["path"])
+        return self._ensure_valid_export_path()
+
     def request_contact_sheet(self) -> None:
         """Renders all visible files small and writes darkroom contact sheet(s)."""
         visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
         if not visible_files:
             return
 
-        if self.state.config.export.output_mode == ExportPresetOutputMode.SAME_AS_SOURCE:
-            out_dir = os.path.dirname(visible_files[0]["path"])
-        else:
-            resolved = self._ensure_valid_export_path()
-            if not resolved:
-                return
-            out_dir = resolved
+        out_dir = self._contact_sheet_output_dir(visible_files)
+        if not out_dir:
+            return
 
         tasks = []
         for f in visible_files:

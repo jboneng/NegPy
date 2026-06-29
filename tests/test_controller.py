@@ -7,6 +7,7 @@ from PyQt6.QtWidgets import QApplication
 
 from negpy.desktop.controller import AppController
 from negpy.desktop.session import DesktopSessionManager, AppState, ToolMode
+from negpy.domain.models import ExportConfig, ExportPresetOutputMode, WorkspaceConfig
 from negpy.services.rendering.preview_manager import PreviewManager
 
 if not QApplication.instance():
@@ -619,6 +620,83 @@ class TestBatchAnalysisFiltering(unittest.TestCase):
             mock_box.question.return_value = 1
             self.controller.request_batch_normalization()
         self.assertEqual(self.emitted, [])
+
+
+class TestContactSheetOutputDir(unittest.TestCase):
+    def setUp(self):
+        self.mock_session_manager = MagicMock(spec=DesktopSessionManager)
+        self.mock_session_manager.state = AppState()
+        self.mock_session_manager.repo = MagicMock()
+        self.mock_session_manager.asset_model = MagicMock()
+
+        with (
+            patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,
+            patch("negpy.desktop.controller.PreviewManager") as mock_pm_class,
+        ):
+            mock_rw_class.return_value = MagicMock()
+            mock_pm_class.return_value = MagicMock(spec=PreviewManager)
+            mock_pm_class.return_value.load_linear_preview.return_value = (None, (0, 0), {})
+            self.controller = AppController(self.mock_session_manager)
+
+        self.visible_files = [
+            {"name": "a.cr2", "path": "/rolls/frame/a.cr2", "hash": "h1"},
+            {"name": "b.cr2", "path": "/rolls/frame/b.cr2", "hash": "h2"},
+        ]
+
+    def tearDown(self):
+        import gc
+
+        for thread in [
+            self.controller.render_thread,
+            self.controller.export_thread,
+            self.controller.thumb_thread,
+            self.controller.norm_thread,
+            self.controller.discovery_thread,
+            self.controller.preview_load_thread,
+            self.controller.scan_thread,
+        ]:
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait()
+        del self.controller
+        gc.collect()
+
+    def test_custom_path_wins_over_export_destination(self):
+        export = ExportConfig(
+            contact_sheet_output_path="/custom/contact",
+            output_mode=ExportPresetOutputMode.SAME_AS_SOURCE,
+        )
+        self.controller.state.config = replace(self.controller.state.config, export=export)
+        out = self.controller._contact_sheet_output_dir(self.visible_files)
+        self.assertEqual(out, "/custom/contact")
+
+    def test_empty_path_uses_source_folder_when_same_as_source(self):
+        export = ExportConfig(
+            contact_sheet_output_path="",
+            output_mode=ExportPresetOutputMode.SAME_AS_SOURCE,
+        )
+        self.controller.state.config = replace(self.controller.state.config, export=export)
+        out = self.controller._contact_sheet_output_dir(self.visible_files)
+        self.assertEqual(out, "/rolls/frame")
+
+    def test_empty_path_uses_export_path_when_absolute(self):
+        export = ExportConfig(
+            contact_sheet_output_path="",
+            output_mode=ExportPresetOutputMode.ABSOLUTE,
+            export_path="/home/user/NegPy/export",
+        )
+        self.controller.state.config = replace(self.controller.state.config, export=export)
+        out = self.controller._contact_sheet_output_dir(self.visible_files)
+        self.assertEqual(out, "/home/user/NegPy/export")
+
+    def test_whitespace_only_path_falls_back_to_export_rules(self):
+        export = ExportConfig(
+            contact_sheet_output_path="   ",
+            output_mode=ExportPresetOutputMode.SAME_AS_SOURCE,
+        )
+        self.controller.state.config = replace(self.controller.state.config, export=export)
+        out = self.controller._contact_sheet_output_dir(self.visible_files)
+        self.assertEqual(out, "/rolls/frame")
 
 
 if __name__ == "__main__":
