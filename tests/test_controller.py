@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QApplication
 
 from negpy.desktop.controller import AppController
 from negpy.desktop.session import DesktopSessionManager, AppState, ToolMode
-from negpy.domain.models import ExportConfig, ExportPresetOutputMode, WorkspaceConfig
+from negpy.domain.models import ExportConfig, ExportPresetOutputMode
 from negpy.services.rendering.preview_manager import PreviewManager
 
 if not QApplication.instance():

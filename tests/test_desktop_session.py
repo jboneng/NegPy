@@ -78,8 +78,6 @@ class TestDesktopSessionSync(unittest.TestCase):
         self.assertFalse(config.exposure.auto_exposure)
 
     def test_contact_sheet_output_path_in_sticky_export(self):
-        from negpy.domain.models import ExportConfig
-
         sticky = {
             "last_export_config": {"contact_sheet_output_path": "/saved/contact", "contact_sheet_cell_px": 800},
         }
