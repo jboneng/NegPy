@@ -145,6 +145,7 @@ class ExportPreset:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     name: str = "Untitled Preset"
     enabled: bool = True
+    render_intent: str = RenderIntent.PRINT
 
     # Format
     export_fmt: str = ExportFormat.JPEG
@@ -180,6 +181,7 @@ class ExportPreset:
             "id": self.id,
             "name": self.name,
             "enabled": self.enabled,
+            "render_intent": self.render_intent,
             "export_fmt": self.export_fmt,
             "jpeg_quality": self.jpeg_quality,
             "jxl_lossless": self.jxl_lossless,
@@ -388,6 +390,40 @@ def flat_master_config(config: WorkspaceConfig) -> WorkspaceConfig:
         shoulder=0.0,
     )
     return replace(config, exposure=flat_exposure)
+
+
+def flat_export_preset(preset: ExportPreset) -> ExportPreset:
+    """Apply flat-master delivery rules to a preset copy (TIFF/DNG, default full-res)."""
+    from copy import copy
+
+    fmt = preset.export_fmt if preset.export_fmt in (ExportFormat.TIFF, ExportFormat.DNG) else ExportFormat.TIFF
+    stub = ExportConfig(
+        export_fmt=fmt,
+        export_resolution_mode=preset.export_resolution_mode,
+        paper_aspect_ratio=preset.paper_aspect_ratio,
+        export_print_size=preset.export_print_size,
+        export_dpi=preset.export_dpi,
+        export_target_long_edge_px=preset.export_target_long_edge_px,
+    )
+    flat = flat_export_config(stub, fmt=fmt)
+    out = copy(preset)
+    out.export_fmt = flat.export_fmt
+    out.export_resolution_mode = flat.export_resolution_mode
+    out.paper_aspect_ratio = flat.paper_aspect_ratio
+    return out
+
+
+def resolve_preset_export(
+    preset: ExportPreset,
+    params: WorkspaceConfig,
+) -> tuple[WorkspaceConfig, ExportPreset]:
+    """Return (pipeline_config, delivery_preset) for one preset-driven export task."""
+    from copy import copy
+
+    delivery = copy(preset)
+    if preset.render_intent != RenderIntent.FLAT:
+        return params, delivery
+    return flat_master_config(params), flat_export_preset(preset)
 
 
 def flat_export_config(export: ExportConfig, fmt: str = ExportFormat.TIFF) -> ExportConfig:

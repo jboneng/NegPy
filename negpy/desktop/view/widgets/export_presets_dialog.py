@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -18,7 +19,8 @@ from PyQt6.QtWidgets import (
 
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.export_settings_form import ExportSettingsForm
-from negpy.domain.models import ExportPreset
+from negpy.domain.models import ColorSpace, ExportFormat, ExportPreset, ExportResolutionMode
+from negpy.features.exposure.models import RenderIntent
 
 
 class ExportPresetsDialog(QDialog):
@@ -71,9 +73,9 @@ class ExportPresetsDialog(QDialog):
         btn_row = QHBoxLayout()
         self.add_btn = QPushButton()
         self.add_btn.setIcon(qta.icon("fa5s.plus", color=THEME.text_primary))
-        self.add_btn.setToolTip("Add preset")
+        self.add_btn.setToolTip("Add print or flat master preset")
         self.add_btn.setFixedWidth(36)
-        self.add_btn.clicked.connect(self._add_preset)
+        self.add_btn.clicked.connect(self._show_add_menu)
 
         self.dup_btn = QPushButton()
         self.dup_btn.setIcon(qta.icon("fa5s.copy", color=THEME.text_primary))
@@ -148,6 +150,10 @@ class ExportPresetsDialog(QDialog):
         row.addWidget(self.enabled_check)
         form.addLayout(row)
 
+        self.intent_label = QLabel()
+        self.intent_label.setStyleSheet(f"color: {THEME.text_muted}; font-size: 10px; border: none;")
+        form.addWidget(self.intent_label)
+
         # Shared FORMAT / SIZE / COLOR / DESTINATION rows.
         self.form = ExportSettingsForm()
         self.form.changed.connect(self._on_form_changed)
@@ -163,7 +169,10 @@ class ExportPresetsDialog(QDialog):
         self.preset_list.blockSignals(True)
         self.preset_list.clear()
         for p in self._presets:
-            item = QListWidgetItem(p.name)
+            label = p.name
+            if p.render_intent == RenderIntent.FLAT:
+                label = f"{p.name} (flat)"
+            item = QListWidgetItem(label)
             item.setCheckState(Qt.CheckState.Checked if p.enabled else Qt.CheckState.Unchecked)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             self.preset_list.addItem(item)
@@ -202,6 +211,13 @@ class ExportPresetsDialog(QDialog):
     def _populate_form(self, preset: ExportPreset) -> None:
         self._updating_form = True
         try:
+            is_flat = preset.render_intent == RenderIntent.FLAT
+            self.intent_label.setText(
+                "Flat master — exports a neutral log intermediate (16-bit TIFF or linear DNG)."
+                if is_flat
+                else "Print — exports the full in-app photographic look."
+            )
+            self.form.set_flat_mode(is_flat, preset_editor=True)
             self.name_edit.setText(preset.name)
             self.enabled_check.setChecked(preset.enabled)
             self.form.load(preset.to_dict())
@@ -214,7 +230,10 @@ class ExportPresetsDialog(QDialog):
         self._presets[self._selected_idx].name = text
         item = self.preset_list.item(self._selected_idx)
         if item:
-            item.setText(text)
+            label = text
+            if self._presets[self._selected_idx].render_intent == RenderIntent.FLAT:
+                label = f"{text} (flat)"
+            item.setText(label)
         self._emit_changed()
 
     def _on_enabled_changed(self, _state: int) -> None:
@@ -257,12 +276,36 @@ class ExportPresetsDialog(QDialog):
     # Preset actions
     # ------------------------------------------------------------------
 
-    def _add_preset(self) -> None:
-        preset = ExportPreset(id=str(uuid.uuid4()), name="New Preset")
+    def _show_add_menu(self) -> None:
+        menu = QMenu(self)
+        menu.addAction("Print preset", self._add_print_preset)
+        menu.addAction("Flat master preset", self._add_flat_preset)
+        menu.exec(self.add_btn.mapToGlobal(self.add_btn.rect().bottomLeft()))
+
+    def _append_preset(self, preset: ExportPreset) -> None:
         self._presets.append(preset)
         self._rebuild_list()
         self._select_row(len(self._presets) - 1)
         self._emit_changed()
+
+    def _add_print_preset(self) -> None:
+        self._append_preset(ExportPreset(id=str(uuid.uuid4()), name="New Preset"))
+
+    def _add_flat_preset(self) -> None:
+        self._append_preset(
+            ExportPreset(
+                id=str(uuid.uuid4()),
+                name="Flat Master",
+                render_intent=RenderIntent.FLAT,
+                export_fmt=ExportFormat.TIFF,
+                export_resolution_mode=ExportResolutionMode.ORIGINAL.value,
+                export_color_space=ColorSpace.PROPHOTO.value,
+                filename_pattern="{{ original_name }}_flat",
+            )
+        )
+
+    def _add_preset(self) -> None:
+        self._add_print_preset()
 
     def _duplicate_preset(self) -> None:
         if self._selected_idx < 0:

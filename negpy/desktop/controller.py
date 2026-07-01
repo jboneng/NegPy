@@ -33,6 +33,7 @@ from negpy.domain.models import (
     flat_export_config,
     flat_master_config,
     preset_from_export_config,
+    resolve_preset_export,
 )
 from negpy.services.assets.sidecar import load_or_promote, write_sidecar
 from negpy.features.exposure.logic import (
@@ -1347,15 +1348,13 @@ class AppController(QObject):
     ) -> List[ExportTask]:
         tasks = []
         for preset in presets:
-            from copy import copy
-
-            p = copy(preset)
-            p.icc_input_path = self.state.icc_input_path
+            task_params, export_settings = resolve_preset_export(preset, params)
+            export_settings.icc_input_path = self.state.icc_input_path
             tasks.append(
                 ExportTask(
                     file_info=file_info,
-                    params=params,
-                    export_settings=p,
+                    params=task_params,
+                    export_settings=export_settings,
                     gpu_enabled=self.state.gpu_enabled,
                     bounds_override=bounds_override,
                     source_exif=source_exif,

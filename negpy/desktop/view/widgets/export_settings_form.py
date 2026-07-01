@@ -435,12 +435,39 @@ class ExportSettingsForm(QWidget):
         else:
             self._ratio_row_widget.setVisible(True)
 
-    def set_flat_mode(self, enabled: bool) -> None:
-        """Toggle flat-master export UI: hide delivery formats, adjust size rows."""
+    def set_flat_mode(self, enabled: bool, *, preset_editor: bool = False) -> None:
+        """Toggle flat-master export UI: hide delivery formats, adjust size rows.
+
+        When ``preset_editor`` is True (Manage Presets dialog), the format row stays
+        visible but limited to TIFF/DNG instead of hiding entirely.
+        """
         enabled = bool(enabled)
-        if enabled == self._flat_mode:
+        if not preset_editor and enabled == self._flat_mode:
             return
         self._flat_mode = enabled
+
+        if preset_editor:
+            self._format_section.setVisible(True)
+            current = self.fmt_combo.currentText()
+            self.fmt_combo.blockSignals(True)
+            self.fmt_combo.clear()
+            if enabled:
+                flat_formats = [ExportFormat.TIFF.value, ExportFormat.DNG.value]
+                self.fmt_combo.addItems(flat_formats)
+                self.fmt_combo.setCurrentText(current if current in flat_formats else ExportFormat.TIFF.value)
+                self._quality_container.setVisible(False)
+                self._jxl_container.setVisible(False)
+                self._webp_container.setVisible(False)
+            else:
+                all_formats = [f.value for f in ExportFormat]
+                self.fmt_combo.addItems(all_formats)
+                self.fmt_combo.setCurrentText(current if current in all_formats else ExportFormat.JPEG.value)
+            self.fmt_combo.blockSignals(False)
+            if not enabled:
+                self._on_fmt_changed(self.fmt_combo.currentText())
+            self._update_ratio_visibility()
+            return
+
         self._format_section.setVisible(not enabled)
         if enabled:
             self._update_ratio_visibility()

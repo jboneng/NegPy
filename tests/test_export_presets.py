@@ -7,6 +7,7 @@ import uuid
 import numpy as np
 import pytest
 import tifffile
+from dataclasses import replace
 from PIL import Image
 
 from negpy.domain.models import (
@@ -18,8 +19,11 @@ from negpy.domain.models import (
     AspectRatio,
     ColorSpace,
     WorkspaceConfig,
+    flat_master_config,
     preset_from_export_config,
+    resolve_preset_export,
 )
+from negpy.features.exposure.models import RenderIntent
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.infrastructure.storage.repository import StorageRepository
 from negpy.services.rendering.image_processor import ImageProcessor
@@ -101,6 +105,47 @@ def test_preset_unknown_keys_dropped():
     d["unknown_future_field"] = "should be ignored"
     p = ExportPreset.from_dict(d)
     assert not hasattr(p, "unknown_future_field")
+
+
+def test_preset_flat_render_intent_round_trip():
+    p = _make_preset(name="Flat Master", render_intent=RenderIntent.FLAT, export_fmt=ExportFormat.DNG)
+    p2 = ExportPreset.from_dict(p.to_dict())
+    assert p2.render_intent == RenderIntent.FLAT
+    assert p2.export_fmt == ExportFormat.DNG
+
+
+def test_preset_render_intent_defaults_to_print():
+    p = ExportPreset.from_dict(_make_preset().to_dict())
+    assert p.render_intent == RenderIntent.PRINT
+
+
+def test_resolve_preset_export_flat_applies_master_pipeline():
+    loud = replace(
+        WorkspaceConfig(),
+        lab=replace(WorkspaceConfig().lab, saturation=2.0, color_separation=1.5),
+        toning=replace(WorkspaceConfig().toning, sepia_strength=1.0),
+    )
+    preset = _make_preset(render_intent=RenderIntent.FLAT, export_fmt=ExportFormat.TIFF)
+    params, delivery = resolve_preset_export(preset, loud)
+    assert params.exposure.render_intent == RenderIntent.FLAT
+    assert params.exposure.auto_exposure is False
+    assert delivery.export_fmt == ExportFormat.TIFF
+    assert delivery.export_resolution_mode == ExportResolutionMode.ORIGINAL.value
+
+
+def test_resolve_preset_export_print_passthrough():
+    preset = _make_preset(export_fmt=ExportFormat.JPEG)
+    params = WorkspaceConfig()
+    out_params, delivery = resolve_preset_export(preset, params)
+    assert out_params is params
+    assert delivery.export_fmt == ExportFormat.JPEG
+    assert delivery.render_intent == RenderIntent.PRINT
+
+
+def test_flat_export_preset_coerces_delivery_format():
+    preset = _make_preset(render_intent=RenderIntent.FLAT, export_fmt=ExportFormat.JPEG)
+    _, delivery = resolve_preset_export(preset, WorkspaceConfig())
+    assert delivery.export_fmt == ExportFormat.TIFF
 
 
 # ---------------------------------------------------------------------------

@@ -156,3 +156,15 @@ def test_flat_mode_skips_jxl_export_block(qapp):
     form.set_flat_mode(False)
     form.set_flat_mode(True)
     assert not form.is_export_blocked()
+
+
+def test_flat_preset_editor_limits_format_choices(qapp):
+    form = ExportSettingsForm()
+    form.load(_values(export_fmt=ExportFormat.JPEG))
+    form.set_flat_mode(True, preset_editor=True)
+    assert [form.fmt_combo.itemText(i) for i in range(form.fmt_combo.count())] == [
+        ExportFormat.TIFF.value,
+        ExportFormat.DNG.value,
+    ]
+    form.set_flat_mode(False, preset_editor=True)
+    assert ExportFormat.JPEG.value in [form.fmt_combo.itemText(i) for i in range(form.fmt_combo.count())]

@@ -24,6 +24,7 @@ from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
 from negpy.desktop.view.widgets.export_settings_form import ExportSettingsForm, constrain_combo
 from negpy.domain.models import ColorSpace
+from negpy.features.exposure.models import RenderIntent
 from negpy.services.export.contact_sheet_templates import ContactSheetLayout, ContactSheetTemplates
 
 
@@ -650,7 +651,10 @@ class ExportSidebar(BaseSidebar):
         self._no_presets_label.setVisible(not presets)
 
         for i, preset in enumerate(presets):
-            cb = QCheckBox(preset.name)
+            label = preset.name
+            if preset.render_intent == RenderIntent.FLAT:
+                label = f"{preset.name} (flat)"
+            cb = QCheckBox(label)
             cb.setChecked(preset.enabled)
             cb.setStyleSheet(f"color: {THEME.text_primary};")
             cb.stateChanged.connect(lambda state, idx=i: self._on_preset_toggled(idx, state))
