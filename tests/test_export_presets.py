@@ -19,7 +19,6 @@ from negpy.domain.models import (
     AspectRatio,
     ColorSpace,
     WorkspaceConfig,
-    flat_master_config,
     preset_from_export_config,
     resolve_preset_export,
 )
