@@ -6,6 +6,7 @@ from negpy.features.exposure.logic import (
     apply_characteristic_curve,
     apply_flat_curve,
     effective_cast_strength,
+    filtration_offsets,
     flat_curve_params,
     grade_coupled_shape,
     normalized_neutral_axis,
@@ -197,11 +198,9 @@ class PhotometricProcessor:
 
         c = EXPOSURE_CONSTANTS
         cmy_max = c["cmy_max_density"]
-        tint = paper.base_tint_cmy
-        cmy_offsets = (
-            self.config.wb_cyan * cmy_max + tint[0],
-            self.config.wb_magenta * cmy_max + tint[1],
-            self.config.wb_yellow * cmy_max + tint[2],
+        cmy_offsets = filtration_offsets(
+            (self.config.wb_cyan, self.config.wb_magenta, self.config.wb_yellow),
+            final_bounds,
         )
         # Manual shadow CMY only; auto neutralization is Cast Removal (slope balance).
         shadow_cmy = (
@@ -262,11 +261,9 @@ class PhotometricProcessor:
         """
         gain, lift = flat_curve_params()
 
-        cmy_max = EXPOSURE_CONSTANTS["cmy_max_density"]
-        cmy_offsets = (
-            self.config.wb_cyan * cmy_max,
-            self.config.wb_magenta * cmy_max,
-            self.config.wb_yellow * cmy_max,
+        cmy_offsets = filtration_offsets(
+            (self.config.wb_cyan, self.config.wb_magenta, self.config.wb_yellow),
+            context.metrics.get("final_bounds"),
         )
 
         is_bw = context.process_mode == ProcessMode.BW
