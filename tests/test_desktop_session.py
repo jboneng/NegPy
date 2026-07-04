@@ -1,4 +1,5 @@
 import unittest
+import os
 from unittest.mock import MagicMock
 from dataclasses import replace
 
@@ -447,6 +448,13 @@ class TestAssetListModelFilter(unittest.TestCase):
         self.assertEqual(self.model.visible_actual_indices_ordered(), self.model._sorted_indices)
         self.assertEqual(self.model.visible_actual_indices(), set(self.model._sorted_indices))
 
+    def test_exportable_visible_indices_ordered_skips_excluded(self):
+        self.state.uploaded_files[1]["excluded"] = True
+        self.model.refresh()
+        names = [self.state.uploaded_files[i]["name"] for i in self.model.exportable_visible_indices_ordered()]
+        self.assertNotIn("IMG_0002.cr2", names)
+        self.assertEqual(len(names), 4)
+
     def test_filter_persists_through_refresh(self):
         self.model.set_filter("IMG", regex=False)
         self.state.uploaded_files.append({"name": "extra.txt", "path": "/tmp/extra.txt", "hash": "h6"})
@@ -458,6 +466,69 @@ class TestAssetListModelFilter(unittest.TestCase):
         self.model.set_filter("IMG", regex=False)
         self.model.set_filter("", regex=False)
         self.assertEqual(len(self.model._sorted_indices), 5)
+
+
+class TestFrameExclusion(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.repo = StorageRepository(
+            os.path.join(self._tmpdir.name, "edits.db"),
+            os.path.join(self._tmpdir.name, "settings.db"),
+        )
+        self.repo.initialize()
+
+        def mock_get_global(key, default=None):
+            if key == "last_export_config":
+                return {}
+            if key == "process_mode":
+                return "C41"
+            return default
+
+        self.repo.get_global_setting = MagicMock(side_effect=mock_get_global)
+        self.repo.get_max_history_index = MagicMock(return_value=0)
+
+        self.session = DesktopSessionManager(self.repo)
+        self.session.state.uploaded_files = [
+            {"name": "file1.dng", "path": os.path.join(self._tmpdir.name, "file1.dng"), "hash": "hash1"},
+            {"name": "file2.dng", "path": os.path.join(self._tmpdir.name, "file2.dng"), "hash": "hash2"},
+        ]
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def test_set_frames_excluded_persists_to_db(self):
+        self.session.set_frames_excluded([0], True)
+        saved = self.repo.load_file_settings("hash1")
+        self.assertIsNotNone(saved)
+        self.assertTrue(saved.excluded_from_batch)
+        self.assertTrue(self.session.state.uploaded_files[0]["excluded"])
+
+    def test_set_frames_excluded_writes_existing_sidecar_only(self):
+        from negpy.services.assets.sidecar import load_sidecar, sidecar_path_for, write_sidecar
+
+        path = self.session.state.uploaded_files[1]["path"]
+        open(path, "wb").close()
+        write_sidecar(path, WorkspaceConfig())
+
+        self.session.set_frames_excluded([1], True)
+
+        loaded = load_sidecar(path)
+        self.assertIsNotNone(loaded)
+        self.assertTrue(loaded.excluded_from_batch)
+        self.assertFalse(os.path.exists(sidecar_path_for(self.session.state.uploaded_files[0]["path"])))
+
+    def test_hydrate_file_excluded_from_sidecar(self):
+        from negpy.services.assets.sidecar import write_sidecar
+
+        path = self.session.state.uploaded_files[0]["path"]
+        open(path, "wb").close()
+        write_sidecar(path, replace(WorkspaceConfig(), excluded_from_batch=True))
+
+        info = {"name": "file1.dng", "path": path, "hash": "hash1"}
+        self.session._hydrate_file_excluded(info)
+        self.assertTrue(info["excluded"])
 
 
 if __name__ == "__main__":

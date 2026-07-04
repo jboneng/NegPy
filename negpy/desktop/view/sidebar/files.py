@@ -2,7 +2,7 @@ import os
 
 import qtawesome as qta
 from PyQt6.QtCore import Qt, QItemSelectionModel, QModelIndex, QRect, QSize, QTimer, pyqtSignal
-from PyQt6.QtGui import QActionGroup, QColor, QPainter, QPen
+from PyQt6.QtGui import QActionGroup, QColor, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from negpy.desktop.controller import AppController
+from negpy.desktop.session import AssetListModel
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.sync_settings_dialog import SyncSettingsDialog
 from negpy.infrastructure.filesystem.watcher import FolderWatchService
@@ -37,6 +38,11 @@ class _ThumbnailDelegate(QStyledItemDelegate):
     dirty active file gets an accent line along the image's bottom edge."""
 
     _MARGIN = 3
+
+    @staticmethod
+    def _grayscale_pixmap(pixmap: QPixmap) -> QPixmap:
+        gray = pixmap.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
+        return QPixmap.fromImage(gray)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         icon = index.data(Qt.ItemDataRole.DecorationRole)
@@ -60,6 +66,10 @@ class _ThumbnailDelegate(QStyledItemDelegate):
         y = area.y() + (area.height() - scaled.height()) // 2
         img_rect = QRect(x, y, scaled.width(), scaled.height())
 
+        excluded = bool(index.data(AssetListModel.ExcludedRole))
+        if excluded:
+            scaled = self._grayscale_pixmap(scaled)
+
         # Selected image full-brightness with a white frame; others dimmed.
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hover = bool(option.state & QStyle.StateFlag.State_MouseOver)
@@ -77,6 +87,14 @@ class _ThumbnailDelegate(QStyledItemDelegate):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(img_rect.adjusted(0, 0, -1, -1))
+
+        if excluded:
+            dot_r = max(3, min(img_rect.width(), img_rect.height()) // 16)
+            cx = img_rect.right() - dot_r - 2
+            cy = img_rect.top() + dot_r + 2
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(THEME.excluded_marker))
+            painter.drawEllipse(cx - dot_r, cy - dot_r, dot_r * 2, dot_r * 2)
 
         painter.restore()
 
@@ -520,6 +538,20 @@ class FileBrowser(QWidget):
             menu.addAction("Export Selected").triggered.connect(lambda: self.controller.request_export_selected())
         else:
             menu.addAction("Export").triggered.connect(lambda: self.controller.request_export())
+        menu.addSeparator()
+        if multi:
+            menu.addAction("Exclude selected").triggered.connect(
+                lambda: self.session.set_frames_excluded(list(state.selected_indices), True)
+            )
+            menu.addAction("Include selected").triggered.connect(
+                lambda: self.session.set_frames_excluded(list(state.selected_indices), False)
+            )
+        else:
+            idx = state.selected_file_idx
+            if 0 <= idx < len(state.uploaded_files) and state.uploaded_files[idx].get("excluded"):
+                menu.addAction("Include image").triggered.connect(lambda: self.session.set_frames_excluded([idx], False))
+            else:
+                menu.addAction("Exclude image").triggered.connect(lambda: self.session.set_frames_excluded([idx], True))
         menu.addSeparator()
         menu.addAction("Copy Settings  Ctrl+C").triggered.connect(self.session.copy_settings)
         menu.addAction("Copy Settings + Bounds  Ctrl+Shift+C").triggered.connect(self.session.copy_settings_with_bounds)

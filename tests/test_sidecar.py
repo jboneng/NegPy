@@ -99,3 +99,12 @@ def test_write_payload_is_to_dict_json(tmp_path):
     with open(sidecar_path_for(src), "r", encoding="utf-8") as f:
         data = json.load(f)
     assert data == json.loads(json.dumps(cfg.to_dict(), default=str))
+
+
+def test_excluded_from_batch_roundtrip(tmp_path):
+    src = str(tmp_path / "IMG_008.NEF")
+    cfg = replace(WorkspaceConfig(), excluded_from_batch=True)
+    write_sidecar(src, cfg)
+    loaded = load_sidecar(src)
+    assert loaded is not None
+    assert loaded.excluded_from_batch is True

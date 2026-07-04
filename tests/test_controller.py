@@ -338,7 +338,7 @@ class TestBatchExportFiltering(unittest.TestCase):
 
         self.visible_indices = [0, 1, 2]
         self.mock_session_manager.asset_model = MagicMock()
-        self.mock_session_manager.asset_model.visible_actual_indices_ordered.side_effect = lambda: list(self.visible_indices)
+        self.mock_session_manager.asset_model.exportable_visible_indices_ordered.side_effect = lambda: list(self.visible_indices)
 
         with (
             patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,
@@ -409,6 +409,67 @@ class TestBatchExportFiltering(unittest.TestCase):
             self.assertEqual(t.params.export.export_path, "/tmp/out")
 
 
+class TestBatchExportExclusion(unittest.TestCase):
+    def setUp(self):
+        self.mock_session_manager = MagicMock(spec=DesktopSessionManager)
+        self.mock_session_manager.state = AppState()
+        self.mock_session_manager.repo = MagicMock()
+        self.mock_session_manager.repo.load_file_settings.return_value = None
+
+        self.mock_session_manager.state.uploaded_files = [
+            {"name": "IMG_0001.cr2", "path": "/tmp/IMG_0001.cr2", "hash": "h1"},
+            {"name": "IMG_0002.cr2", "path": "/tmp/IMG_0002.cr2", "hash": "h2", "excluded": True},
+            {"name": "scan.tif", "path": "/tmp/scan.tif", "hash": "h3"},
+        ]
+
+        self.exportable_indices = [0, 2]
+        self.mock_session_manager.asset_model = MagicMock()
+        self.mock_session_manager.asset_model.exportable_visible_indices_ordered.side_effect = (
+            lambda: list(self.exportable_indices)
+        )
+
+        with (
+            patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,
+            patch("negpy.desktop.controller.PreviewManager") as mock_pm_class,
+        ):
+            mock_rw_class.return_value = MagicMock()
+            mock_pm_class.return_value = MagicMock(spec=PreviewManager)
+            mock_pm_class.return_value.load_linear_preview.return_value = (None, (0, 0), {})
+            self.controller = AppController(self.mock_session_manager)
+
+        self.controller._ensure_valid_export_path = MagicMock(return_value="/tmp/out")
+        self.controller._run_export_tasks = MagicMock()
+
+    def tearDown(self):
+        import gc
+
+        for thread in [
+            self.controller.render_thread,
+            self.controller.export_thread,
+            self.controller.thumb_thread,
+            self.controller.norm_thread,
+            self.controller.discovery_thread,
+            self.controller.preview_load_thread,
+            self.controller.scan_thread,
+        ]:
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait()
+        del self.controller
+        gc.collect()
+
+    def test_batch_export_skips_excluded_via_exportable_indices(self):
+        self.controller.request_batch_export()
+        tasks = self.controller._run_export_tasks.call_args.args[0]
+        self.assertEqual([t.file_info["name"] for t in tasks], ["IMG_0001.cr2", "scan.tif"])
+
+    def test_export_selected_skips_excluded_even_when_selected(self):
+        self.controller.state.selected_indices = [0, 1, 2]
+        self.controller.request_export_selected()
+        tasks = self.controller._run_export_tasks.call_args.args[0]
+        self.assertEqual([t.file_info["name"] for t in tasks], ["IMG_0001.cr2", "scan.tif"])
+
+
 class TestPresetBatchExport(unittest.TestCase):
     def setUp(self):
         self.mock_session_manager = MagicMock(spec=DesktopSessionManager)
@@ -428,7 +489,7 @@ class TestPresetBatchExport(unittest.TestCase):
 
         self.visible_indices = [0, 1, 2]
         self.mock_session_manager.asset_model = MagicMock()
-        self.mock_session_manager.asset_model.visible_actual_indices_ordered.side_effect = lambda: list(self.visible_indices)
+        self.mock_session_manager.asset_model.exportable_visible_indices_ordered.side_effect = lambda: list(self.visible_indices)
 
         with (
             patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,
@@ -475,12 +536,14 @@ class TestPresetBatchExport(unittest.TestCase):
         self.assertEqual(len(tasks), 4)
         self.assertEqual([t.file_info["name"] for t in tasks], ["IMG_0001.cr2"] * 2 + ["IMG_0002.cr2"] * 2)
 
+    @patch("negpy.desktop.controller.QMessageBox.information")
     @patch("negpy.desktop.controller.QMessageBox.question")
-    def test_preset_batch_export_zero_visible_does_not_dispatch(self, mock_question):
+    def test_preset_batch_export_zero_visible_does_not_dispatch(self, mock_question, mock_info):
         self.visible_indices = []
         self.controller.request_preset_batch_export()
         self.controller._run_export_tasks.assert_not_called()
         mock_question.assert_not_called()
+        mock_info.assert_called_once()
 
     @patch("negpy.desktop.controller.QMessageBox.question")
     def test_preset_batch_export_cancel_does_not_dispatch(self, mock_question):
@@ -716,7 +779,7 @@ class TestBatchAnalysisFiltering(unittest.TestCase):
 
         self.visible_indices = [0, 1, 2]
         self.mock_session_manager.asset_model = MagicMock()
-        self.mock_session_manager.asset_model.visible_actual_indices_ordered.side_effect = lambda: list(self.visible_indices)
+        self.mock_session_manager.asset_model.exportable_visible_indices_ordered.side_effect = lambda: list(self.visible_indices)
 
         with (
             patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,

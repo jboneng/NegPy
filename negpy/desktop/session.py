@@ -10,7 +10,7 @@ from PyQt6.QtCore import QAbstractListModel, QModelIndex, QObject, Qt, pyqtSigna
 from negpy.domain.models import ExportPreset, WorkspaceConfig
 from negpy.infrastructure.storage.repository import StorageRepository
 from negpy.kernel.system.config import APP_CONFIG
-from negpy.services.assets.sidecar import load_or_promote
+from negpy.services.assets.sidecar import load_or_promote, sidecar_path_for, write_sidecar
 
 
 class ToolMode(Enum):
@@ -108,6 +108,8 @@ class AssetListModel(QAbstractListModel):
     Model for the uploaded files list with thumbnail support.
     """
 
+    ExcludedRole = Qt.ItemDataRole.UserRole + 1
+
     def __init__(self, state: AppState):
         super().__init__()
         self._state = state
@@ -188,6 +190,19 @@ class AssetListModel(QAbstractListModel):
     def visible_actual_indices_ordered(self) -> list[int]:
         return list(self._sorted_indices)
 
+    def exportable_visible_indices_ordered(self) -> list[int]:
+        files = self._state.uploaded_files
+        return [i for i in self._sorted_indices if not files[i].get("excluded")]
+
+    def notify_exclusion_changed(self, actual_indices: list[int]) -> None:
+        roles = [AssetListModel.ExcludedRole, Qt.ItemDataRole.DecorationRole]
+        for actual in actual_indices:
+            display = self.actual_to_display(actual)
+            if display < 0:
+                continue
+            idx = self.index(display, 0)
+            self.dataChanged.emit(idx, idx, roles)
+
     def display_to_actual(self, display_row: int) -> int:
         if display_row < 0 or display_row >= len(self._sorted_indices):
             return -1
@@ -216,6 +231,9 @@ class AssetListModel(QAbstractListModel):
 
         if role == Qt.ItemDataRole.ToolTipRole:
             return file_info["path"]
+
+        if role == AssetListModel.ExcludedRole:
+            return bool(file_info.get("excluded"))
 
         return None
 
@@ -675,6 +693,8 @@ class DesktopSessionManager(QObject):
                     self.state.config, rgbscan=RgbScanConfig(enabled=True, green_path=green, blue_path=blue, align=align)
                 )
 
+            file_info["excluded"] = self.state.config.excluded_from_batch
+
             self.file_selected.emit(file_info["path"])
             self.state_changed.emit()
             self._persist_session()
@@ -683,6 +703,44 @@ class DesktopSessionManager(QObject):
         """Updates the list of currently selected indices."""
         self.state.selected_indices = indices
         self.state_changed.emit()
+
+    def _hydrate_file_excluded(self, file_info: dict) -> None:
+        cfg = load_or_promote(self.repo, file_info["hash"], file_info["path"])
+        file_info["excluded"] = bool(cfg.excluded_from_batch) if cfg else False
+
+    def set_frames_excluded(self, indices: List[int], excluded: bool) -> None:
+        """Mark frames included/excluded from batch export; persists to DB and existing sidecars."""
+        from negpy.kernel.system.logging import get_logger
+
+        logger = get_logger(__name__)
+        changed: list[int] = []
+        for idx in sorted(set(indices)):
+            if not (0 <= idx < len(self.state.uploaded_files)):
+                continue
+            file_info = self.state.uploaded_files[idx]
+            path = file_info["path"]
+            f_hash = file_info["hash"]
+
+            if idx == self.state.selected_file_idx:
+                params = replace(self.state.config, excluded_from_batch=excluded)
+                self.state.config = params
+            else:
+                params = self.repo.load_file_settings(f_hash) or WorkspaceConfig()
+                params = replace(params, excluded_from_batch=excluded)
+
+            self.repo.save_file_settings(f_hash, params)
+            if os.path.exists(sidecar_path_for(path)):
+                try:
+                    write_sidecar(path, params)
+                except OSError as exc:
+                    logger.warning("Sidecar write failed for %s: %s", path, exc)
+
+            file_info["excluded"] = excluded
+            changed.append(idx)
+
+        if changed:
+            self.asset_model.notify_exclusion_changed(changed)
+            self.state_changed.emit()
 
     def sync_selected_settings(self, aspects: frozenset, scope: str = "selection") -> int:
         """
@@ -909,6 +967,7 @@ class DesktopSessionManager(QObject):
             for info in validated_info:
                 if any(f["hash"] == info["hash"] for f in self.state.uploaded_files):
                     continue
+                self._hydrate_file_excluded(info)
                 self.state.uploaded_files.append(info)
         else:
             for path in file_paths:
@@ -920,7 +979,9 @@ class DesktopSessionManager(QObject):
                     if any(f["hash"] == f_hash for f in self.state.uploaded_files):
                         continue
 
-                    self.state.uploaded_files.append({"name": os.path.basename(path), "path": path, "hash": f_hash})
+                    info = {"name": os.path.basename(path), "path": path, "hash": f_hash}
+                    self._hydrate_file_excluded(info)
+                    self.state.uploaded_files.append(info)
                 except Exception as e:
                     from negpy.kernel.system.logging import get_logger
 

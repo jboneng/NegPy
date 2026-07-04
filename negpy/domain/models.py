@@ -267,6 +267,7 @@ class WorkspaceConfig:
     finish: FinishConfig = field(default_factory=FinishConfig)
     metadata: MetadataConfig = field(default_factory=MetadataConfig)
     export: ExportConfig = field(default_factory=ExportConfig)
+    excluded_from_batch: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -285,6 +286,7 @@ class WorkspaceConfig:
         res.update(asdict(self.finish))
         res.update(asdict(self.metadata))
         res.update(asdict(self.export))
+        res["excluded_from_batch"] = self.excluded_from_batch
         return res
 
     @classmethod
@@ -326,6 +328,8 @@ class WorkspaceConfig:
             data["output_mode"] = ExportPresetOutputMode.SAME_AS_SOURCE if data.pop("same_as_source") else ExportPresetOutputMode.ABSOLUTE
         else:
             data.pop("same_as_source", None)
+
+        excluded_from_batch = bool(data.pop("excluded_from_batch", False))
 
         config_classes = [
             ProcessConfig,
@@ -378,6 +382,7 @@ class WorkspaceConfig:
             finish=FinishConfig(**filter_keys(FinishConfig, data)),
             metadata=MetadataConfig(**filter_keys(MetadataConfig, data)),
             export=ExportConfig(**filter_keys(ExportConfig, data)),
+            excluded_from_batch=excluded_from_batch,
         )
 
 

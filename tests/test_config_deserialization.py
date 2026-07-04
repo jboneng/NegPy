@@ -147,6 +147,12 @@ class TestConfigDeserialization(unittest.TestCase):
         config = WorkspaceConfig.from_flat_dict({"autocrop_mode": "banana"})
         self.assertEqual(config.geometry.autocrop_mode, "image")
 
+    def test_excluded_from_batch_roundtrip(self):
+        config = replace(WorkspaceConfig(), excluded_from_batch=True)
+        reloaded = WorkspaceConfig.from_flat_dict(config.to_dict())
+        self.assertTrue(reloaded.excluded_from_batch)
+        self.assertFalse(WorkspaceConfig.from_flat_dict({}).excluded_from_batch)
+
 
 if __name__ == "__main__":
     unittest.main()

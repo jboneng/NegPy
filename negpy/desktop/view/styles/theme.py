@@ -63,6 +63,7 @@ class ThemeConfig:
 
     # Channel colors (histogram)
     channel_red: str = "#D32F2F"
+    excluded_marker: str = "#6E2C2C"
     channel_green: str = "#388E3C"
     channel_blue: str = "#1976D2"
 

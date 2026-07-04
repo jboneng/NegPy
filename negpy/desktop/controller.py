@@ -1325,6 +1325,12 @@ class AppController(QObject):
     def _enabled_presets(self) -> List[ExportPreset]:
         return [p for p in self.state.export_presets if p.enabled]
 
+    def _exportable_visible_files(self) -> list[dict]:
+        return [
+            self.state.uploaded_files[i]
+            for i in self.session.asset_model.exportable_visible_indices_ordered()
+        ]
+
     def _validate_preset_paths(self, presets: List[ExportPreset]) -> bool:
         """Returns True if all absolute-path presets have a valid directory configured."""
         from PyQt6.QtWidgets import QFileDialog
@@ -1456,7 +1462,11 @@ class AppController(QObject):
 
     def request_export_selected(self) -> None:
         """Batch-exports the currently selected files using each file's own saved settings."""
-        selected = [self.state.uploaded_files[i] for i in self.state.selected_indices if 0 <= i < len(self.state.uploaded_files)]
+        selected = [
+            self.state.uploaded_files[i]
+            for i in self.state.selected_indices
+            if 0 <= i < len(self.state.uploaded_files) and not self.state.uploaded_files[i].get("excluded")
+        ]
         self.request_batch_export(files=selected)
 
     def request_batch_export(self, override_settings: bool = False, files: list[dict] | None = None) -> None:
@@ -1471,7 +1481,12 @@ class AppController(QObject):
         sync_metadata = self.state.config.metadata.sync_to_batch
 
         if files is None:
-            files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+            files = self._exportable_visible_files()
+        else:
+            files = [f for f in files if not f.get("excluded")]
+
+        if not files:
+            return
 
         if self.state.config.export.export_sidecars_enabled:
             self._write_edit_sidecars(files)
@@ -1562,8 +1577,13 @@ class AppController(QObject):
             return
 
         sync_metadata = self.state.config.metadata.sync_to_batch
-        visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+        visible_files = self._exportable_visible_files()
         if not visible_files:
+            QMessageBox.information(
+                None,
+                "No files to export",
+                "All visible frames are excluded from batch export.",
+            )
             return
 
         n_frames = len(visible_files)
@@ -1622,7 +1642,7 @@ class AppController(QObject):
 
     def request_contact_sheet(self) -> None:
         """Renders all visible files small and writes darkroom contact sheet(s)."""
-        visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+        visible_files = self._exportable_visible_files()
         if not visible_files:
             return
 
@@ -1673,7 +1693,7 @@ class AppController(QObject):
 
     def export_edit_sidecars(self) -> None:
         """Explicit batch sidecar export for all visible files (ignores the on-export toggle)."""
-        visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+        visible_files = self._exportable_visible_files()
         if not visible_files:
             return
         written = self._write_edit_sidecars(visible_files)
