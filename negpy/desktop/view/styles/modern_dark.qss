@@ -259,3 +259,29 @@ QLabel#update_label {
     font-weight: bold;
     padding: 5px;
 }
+
+QPushButton#export_presets_btn {
+    text-align: center;
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    border-right: none;
+}
+
+QToolButton#export_presets_menu_btn {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid #3A3A3A;
+    padding: 6px 4px;
+}
+
+QToolButton#export_presets_menu_btn::menu-button {
+    width: 0px;
+    border: none;
+    padding: 0px;
+}
+
+QToolButton#export_presets_menu_btn::menu-arrow {
+    image: none;
+    width: 0px;
+    height: 0px;
+}

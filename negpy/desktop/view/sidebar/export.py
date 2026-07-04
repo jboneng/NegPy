@@ -1,7 +1,7 @@
 import os
 
 import qtawesome as qta
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QSize, QTimer
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -11,9 +11,12 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -75,6 +78,7 @@ class ExportSidebar(BaseSidebar):
 
         self.manage_presets_btn.clicked.connect(self._open_presets_dialog)
         self.export_presets_btn.clicked.connect(self.controller.request_preset_export)
+        self.export_presets_menu_btn.clicked.connect(self._show_export_presets_menu)
 
         self.intent_btn_group.idToggled.connect(self._on_flat_output_toggled)
         self.flat_format_combo.currentIndexChanged.connect(self._on_flat_format_changed)
@@ -120,12 +124,46 @@ class ExportSidebar(BaseSidebar):
         self.manage_presets_btn = QPushButton(" Manage")
         self.manage_presets_btn.setObjectName("manage_presets_btn")
         self.manage_presets_btn.setIcon(qta.icon("fa5s.sliders-h", color=THEME.text_primary))
+        self.manage_presets_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        preset_scope_tooltip = (
+            "Export the current file with every enabled preset. "
+            "Use the menu arrow for other scopes."
+        )
+        self.export_presets_group = QWidget()
+        export_presets_row = QHBoxLayout(self.export_presets_group)
+        export_presets_row.setContentsMargins(0, 0, 0, 0)
+        export_presets_row.setSpacing(0)
+
         self.export_presets_btn = QPushButton(" Export Presets")
         self.export_presets_btn.setObjectName("export_presets_btn")
         self.export_presets_btn.setIcon(qta.icon("fa5s.layer-group", color=THEME.text_primary))
-        self.export_presets_btn.setToolTip("Export the current file with every enabled preset")
-        preset_btn_row.addWidget(self.manage_presets_btn)
-        preset_btn_row.addWidget(self.export_presets_btn)
+        self.export_presets_btn.setToolTip(preset_scope_tooltip)
+        self.export_presets_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        preset_menu = QMenu(self)
+        export_current_action = preset_menu.addAction("Export current frame")
+        export_current_action.setToolTip("Export the current file with every enabled preset")
+        export_current_action.triggered.connect(self.controller.request_preset_export)
+        export_all_presets_action = preset_menu.addAction("Export all visible frames…")
+        export_all_presets_action.setToolTip(
+            "Export every visible frame in the filmstrip with every enabled preset"
+        )
+        export_all_presets_action.triggered.connect(self.controller.request_preset_batch_export)
+
+        self.export_presets_menu_btn = QToolButton()
+        self.export_presets_menu_btn.setObjectName("export_presets_menu_btn")
+        self.export_presets_menu_btn.setAutoRaise(False)
+        self.export_presets_menu_btn.setIcon(qta.icon("fa5s.chevron-down", color=THEME.text_primary))
+        self.export_presets_menu_btn.setIconSize(QSize(18, 18))
+        self.export_presets_menu_btn.setFixedWidth(36)
+        self.export_presets_menu_btn.setToolTip(preset_scope_tooltip)
+        self._export_presets_menu = preset_menu
+
+        export_presets_row.addWidget(self.export_presets_btn, 1)
+        export_presets_row.addWidget(self.export_presets_menu_btn, 0)
+        self.export_presets_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        preset_btn_row.addWidget(self.manage_presets_btn, 0)
+        preset_btn_row.addWidget(self.export_presets_group, 1)
         content_layout.addLayout(preset_btn_row)
 
         repo = self.controller.session.repo
@@ -664,6 +702,10 @@ class ExportSidebar(BaseSidebar):
         if 0 <= idx < len(presets):
             presets[idx].enabled = state == Qt.CheckState.Checked.value
             self.controller.session.save_export_presets()
+
+    def _show_export_presets_menu(self) -> None:
+        btn = self.export_presets_menu_btn
+        self._export_presets_menu.exec(btn.mapToGlobal(btn.rect().bottomLeft()))
 
     def _open_presets_dialog(self) -> None:
         from negpy.desktop.view.widgets.export_presets_dialog import ExportPresetsDialog

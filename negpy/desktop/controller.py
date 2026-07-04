@@ -1563,6 +1563,24 @@ class AppController(QObject):
 
         sync_metadata = self.state.config.metadata.sync_to_batch
         visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+        if not visible_files:
+            return
+
+        n_frames = len(visible_files)
+        n_presets = len(presets)
+        n_files = n_frames * n_presets
+        frame_word = "frame" if n_frames == 1 else "frames"
+        preset_word = "preset" if n_presets == 1 else "presets"
+        file_word = "file" if n_files == 1 else "files"
+        reply = QMessageBox.question(
+            None,
+            "Export All Presets",
+            f"Export {n_frames} {frame_word} through {n_presets} {preset_word} ({n_files} {file_word})?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
 
         if self.state.config.export.export_sidecars_enabled:
             self._write_edit_sidecars(visible_files)
