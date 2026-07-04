@@ -1,3 +1,4 @@
+import math
 from typing import Optional
 
 from PyQt6.QtWidgets import (
@@ -11,7 +12,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPainter, QColor, QPen
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QRect, QEvent
 from negpy.desktop.view.styles.theme import THEME
-from negpy.desktop.view.styles.templates import slider_label_qss, hue_handle_qss
+from negpy.desktop.view.styles.templates import slider_label_qss, slider_handle_qss
 
 
 class _NoScrollSlider(QSlider):
@@ -108,7 +109,9 @@ class BaseSlider(QWidget):
         self._precision = precision
         self._last_committed_value = default_val
 
-        default_pos = (default_val - min_val) / (max_val - min_val) if max_val > min_val else None
+        # sorted() keeps a decreasing value->int mapping (e.g. Kelvin->mired) legal.
+        lo, hi = sorted((self._to_int(min_val), self._to_int(max_val)))
+        default_pos = (self._to_int(default_val) - lo) / (hi - lo) if hi > lo else None
         if inverted and default_pos is not None:
             default_pos = 1.0 - default_pos
         self.slider = _NoScrollSlider(Qt.Orientation.Horizontal, default_pos=default_pos)
@@ -117,9 +120,9 @@ class BaseSlider(QWidget):
             self.slider.setInvertedControls(True)
         if has_neutral:
             self.slider.setObjectName("neutral_slider")
-        self.slider.setRange(int(min_val * self._precision), int(max_val * self._precision))
-        self.slider.setValue(int(default_val * self._precision))
-        self.slider._default_slider_value = int(default_val * self._precision)
+        self.slider.setRange(lo, hi)
+        self.slider.setValue(self._to_int(default_val))
+        self.slider._default_slider_value = self._to_int(default_val)
 
         self.spin = _NoScrollSpinBox()
         self.spin.setRange(min_val, max_val)
@@ -152,8 +155,16 @@ class BaseSlider(QWidget):
             self._last_committed_value = current_val
             self.valueCommitted.emit(current_val)
 
+    def _to_int(self, value: float) -> int:
+        """Value -> slider int; subclasses override the pair for nonlinear
+        travel. Must stay stateless: called during __init__."""
+        return int(value * self._precision)
+
+    def _from_int(self, i: int) -> float:
+        return i / self._precision
+
     def _on_slider_changed(self, value: int) -> None:
-        f_val = value / self._precision
+        f_val = self._from_int(value)
         self.spin.blockSignals(True)
         self.spin.setValue(f_val)
         self.spin.blockSignals(False)
@@ -161,7 +172,7 @@ class BaseSlider(QWidget):
 
     def _on_spin_changed(self, value: float) -> None:
         self.slider.blockSignals(True)
-        self.slider.setValue(int(value * self._precision))
+        self.slider.setValue(self._to_int(value))
         self.slider.blockSignals(False)
         self.timer.start()
 
@@ -173,7 +184,7 @@ class BaseSlider(QWidget):
             return
         self.slider.blockSignals(True)
         self.spin.blockSignals(True)
-        self.slider.setValue(int(value * self._precision))
+        self.slider.setValue(self._to_int(value))
         self.spin.setValue(value)
         self.slider.blockSignals(False)
         self.spin.blockSignals(False)
@@ -339,7 +350,7 @@ class HueSlider(CompactSlider):
         h = int(hue_deg) % 360
         color = QColor.fromHsv(h, 200, 210)
         self._update_edited_state()
-        self.slider.setStyleSheet(hue_handle_qss(color.name()))
+        self.slider.setStyleSheet(slider_handle_qss(color.name()))
 
     def _on_slider_changed(self, value: int) -> None:
         super()._on_slider_changed(value)
@@ -348,6 +359,50 @@ class HueSlider(CompactSlider):
     def setValue(self, value: float) -> None:
         super().setValue(value)
         self._apply_hue(value)
+
+
+def _kelvin_handle_color(kelvin: float) -> QColor:
+    """Blackbody colour (Tanner Helland approximation), softened to the same
+    saturation/brightness as the HueSlider handles."""
+    t = kelvin / 100.0
+    r = 255.0 if t <= 66 else 329.698727446 * (t - 60) ** -0.1332047592
+    g = 99.4708025861 * math.log(t) - 161.1195681661 if t <= 66 else 288.1221695283 * (t - 60) ** -0.0755148492
+    b = 255.0 if t >= 66 else 138.5177312231 * math.log(t - 10.0) - 305.0447927307
+    c = QColor(*(int(min(255.0, max(0.0, v))) for v in (r, g, b)))
+    if c.hue() < 0:
+        return QColor(210, 210, 210)
+    return QColor.fromHsv(c.hue(), min(c.saturation(), 200), 210)
+
+
+class KelvinSlider(CompactSlider):
+    """
+    Kelvin readout with mired-linear travel: slider ints are mired*10, so warm
+    (low K) sits on the right and equal drag distance = equal perceived shift.
+    The handle tints to the blackbody colour of the current temperature.
+    """
+
+    def __init__(self, label: str, parent=None):
+        super().__init__(label, 3000.0, 12000.0, 5500.0, step=50.0, precision=1, unit="K", parent=parent)
+        self._spin_full_width = 68  # room for "12000K"
+        self._apply_temp(5500.0)
+
+    def _to_int(self, value: float) -> int:
+        return round(1e7 / max(value, 1.0))
+
+    def _from_int(self, i: int) -> float:
+        # Snap to 10K so the 5500 default round-trips exactly (edited-state check).
+        return round(1e6 / (i / 10.0) / 10.0) * 10.0
+
+    def _apply_temp(self, kelvin: float) -> None:
+        self.slider.setStyleSheet(slider_handle_qss(_kelvin_handle_color(kelvin).name()))
+
+    def _on_slider_changed(self, value: int) -> None:
+        super()._on_slider_changed(value)
+        self._apply_temp(self._from_int(value))
+
+    def setValue(self, value: float) -> None:
+        super().setValue(value)
+        self._apply_temp(self.value())
 
 
 class RangeSlider(QWidget):
