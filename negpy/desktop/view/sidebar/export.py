@@ -77,7 +77,7 @@ class ExportSidebar(BaseSidebar):
         self.controller.monitor_profile_changed.connect(self._refresh_display_info)
 
         self.manage_presets_btn.clicked.connect(self._open_presets_dialog)
-        self.export_presets_btn.clicked.connect(self.controller.request_preset_export)
+        self.export_presets_btn.clicked.connect(self.controller.request_preset_export_selected)
         self.export_presets_menu_btn.clicked.connect(self._show_export_presets_menu)
 
         self.intent_btn_group.idToggled.connect(self._on_flat_output_toggled)
@@ -126,8 +126,8 @@ class ExportSidebar(BaseSidebar):
         self.manage_presets_btn.setIcon(qta.icon("fa5s.sliders-h", color=THEME.text_primary))
         self.manage_presets_btn.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
         preset_scope_tooltip = (
-            "Export the current file with every enabled preset. "
-            "Use the menu arrow for other scopes."
+            "Export the selected filmstrip frames with every enabled preset. "
+            "Use the menu arrow for current frame or all visible frames."
         )
         self.export_presets_group = QWidget()
         export_presets_row = QHBoxLayout(self.export_presets_group)

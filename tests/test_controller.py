@@ -504,6 +504,97 @@ class TestPresetBatchExport(unittest.TestCase):
         self.assertIn("6 files", message)
 
 
+class TestPresetExportSelected(unittest.TestCase):
+    def setUp(self):
+        self.mock_session_manager = MagicMock(spec=DesktopSessionManager)
+        self.mock_session_manager.state = AppState()
+        self.mock_session_manager.repo = MagicMock()
+        self.mock_session_manager.repo.load_file_settings.return_value = None
+        self.mock_session_manager.state.current_file_path = "/tmp/IMG_0002.cr2"
+        self.mock_session_manager.state.current_file_hash = "h2"
+
+        self.mock_session_manager.state.uploaded_files = [
+            {"name": "IMG_0001.cr2", "path": "/tmp/IMG_0001.cr2", "hash": "h1"},
+            {"name": "IMG_0002.cr2", "path": "/tmp/IMG_0002.cr2", "hash": "h2"},
+            {"name": "scan.tif", "path": "/tmp/scan.tif", "hash": "h3"},
+        ]
+        self.mock_session_manager.state.export_presets = [
+            ExportPreset(name="JPEG", enabled=True, export_fmt=ExportFormat.JPEG),
+            ExportPreset(name="TIFF", enabled=True, export_fmt=ExportFormat.TIFF),
+        ]
+        self.mock_session_manager.state.selected_indices = [2, 0]
+
+        self.visible_indices = [0, 1, 2]
+        self.mock_session_manager.asset_model = MagicMock()
+        self.mock_session_manager.asset_model.visible_actual_indices_ordered.side_effect = (
+            lambda: list(self.visible_indices)
+        )
+
+        with (
+            patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,
+            patch("negpy.desktop.controller.PreviewManager") as mock_pm_class,
+        ):
+            mock_rw_class.return_value = MagicMock()
+            mock_pm_class.return_value = MagicMock(spec=PreviewManager)
+            mock_pm_class.return_value.load_linear_preview.return_value = (None, (0, 0), {})
+            self.controller = AppController(self.mock_session_manager)
+
+        self.controller._validate_preset_paths = MagicMock(return_value=True)
+        self.controller._run_export_tasks = MagicMock()
+
+    def tearDown(self):
+        import gc
+
+        for thread in [
+            self.controller.render_thread,
+            self.controller.export_thread,
+            self.controller.thumb_thread,
+            self.controller.norm_thread,
+            self.controller.discovery_thread,
+            self.controller.preview_load_thread,
+            self.controller.scan_thread,
+        ]:
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait()
+        del self.controller
+        gc.collect()
+
+    def test_preset_export_selected_uses_display_order_without_confirmation(self):
+        self.mock_session_manager.state.selected_indices = [2, 0]
+        with patch("negpy.desktop.controller.QMessageBox.question") as mock_question:
+            self.controller.request_preset_export_selected()
+            mock_question.assert_not_called()
+
+        tasks = self.controller._run_export_tasks.call_args.args[0]
+        self.assertEqual(len(tasks), 4)
+        self.assertEqual([t.file_info["name"] for t in tasks], ["IMG_0001.cr2"] * 2 + ["scan.tif"] * 2)
+
+    def test_preset_export_single_selection_uses_preview_frame(self):
+        self.mock_session_manager.state.selected_indices = [0]
+        self.mock_session_manager.state.selected_file_idx = 2
+        self.mock_session_manager.state.current_file_path = "/tmp/scan.tif"
+        self.controller.request_preset_export_selected()
+        tasks = self.controller._run_export_tasks.call_args.args[0]
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual({t.file_info["name"] for t in tasks}, {"scan.tif"})
+
+    def test_preset_export_selected_skips_excluded(self):
+        self.mock_session_manager.state.uploaded_files[0]["excluded"] = True
+        with patch("negpy.desktop.controller.QMessageBox.question") as mock_question:
+            self.controller.request_preset_export_selected()
+            mock_question.assert_not_called()
+
+        tasks = self.controller._run_export_tasks.call_args.args[0]
+        self.assertEqual([t.file_info["name"] for t in tasks], ["scan.tif"] * 2)
+
+    def test_preset_export_current_frame_menu_unchanged(self):
+        self.controller.request_preset_export()
+        tasks = self.controller._run_export_tasks.call_args.args[0]
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual({t.file_info["name"] for t in tasks}, {"IMG_0002.cr2"})
+
+
 class TestSessionRestore(unittest.TestCase):
     def setUp(self):
         self.mock_session_manager = MagicMock(spec=DesktopSessionManager)
