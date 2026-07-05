@@ -1527,73 +1527,32 @@ class AppController(QObject):
         if tasks:
             self._run_export_tasks(tasks)
 
-    def request_preset_export(self) -> None:
-        """Initiates high-resolution export for the current file using enabled presets."""
-        if not self.state.current_file_path:
-            return
+    def _preset_export_files_for_selection(self) -> list[dict]:
+        """Selected filmstrip frames in display order; single selection exports the preview frame."""
+        n = len(self.state.uploaded_files)
+        selected = [i for i in self.state.selected_indices if 0 <= i < n]
 
-        presets = self._enabled_presets()
-        if not presets:
-            QMessageBox.information(None, "No presets enabled", "Enable at least one export preset in the Export panel.")
-            return
+        if len(selected) <= 1:
+            if not self.state.current_file_path or not (0 <= self.state.selected_file_idx < n):
+                return []
+            file_info = self.state.uploaded_files[self.state.selected_file_idx]
+            if file_info.get("excluded"):
+                return []
+            return [file_info]
 
-        if not self._validate_preset_paths(presets):
-            return
+        selected_set = set(selected)
+        visible_order = self.session.asset_model.visible_actual_indices_ordered()
+        ordered = [i for i in visible_order if i in selected_set]
+        for i in sorted(selected_set):
+            if i not in ordered:
+                ordered.append(i)
+        files = [self.state.uploaded_files[i] for i in ordered]
+        return [f for f in files if not f.get("excluded")]
 
-        source_exif = self.state.source_exif.get(self.state.current_file_hash or "")
-        file_info = {
-            "name": os.path.basename(self.state.current_file_path),
-            "path": self.state.current_file_path,
-            "hash": self.state.current_file_hash,
-        }
-        if self.state.config.export.export_sidecars_enabled:
-            self._write_edit_sidecars([file_info])
-        tasks = self._tasks_for_file(
-            file_info,
-            self.state.config,
-            presets,
-            source_exif=source_exif,
-            metadata_config=self.state.config.metadata,
-        )
-        if tasks:
-            self._run_export_tasks(tasks)
-
-    def request_preset_batch_export(self) -> None:
-        """Initiates batch export for all visible files using enabled presets."""
-        presets = self._enabled_presets()
-        if not presets:
-            QMessageBox.information(None, "No presets enabled", "Enable at least one export preset in the Export panel.")
-            return
-
-        if not self._validate_preset_paths(presets):
-            return
-
+    def _build_preset_export_tasks(self, files: list[dict], presets: List[ExportPreset]) -> List[ExportTask]:
         sync_metadata = self.state.config.metadata.sync_to_batch
-        visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
-        if not visible_files:
-            return
-
-        n_frames = len(visible_files)
-        n_presets = len(presets)
-        n_files = n_frames * n_presets
-        frame_word = "frame" if n_frames == 1 else "frames"
-        preset_word = "preset" if n_presets == 1 else "presets"
-        file_word = "file" if n_files == 1 else "files"
-        reply = QMessageBox.question(
-            None,
-            "Export All Presets",
-            f"Export {n_frames} {frame_word} through {n_presets} {preset_word} ({n_files} {file_word})?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Cancel,
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-
-        if self.state.config.export.export_sidecars_enabled:
-            self._write_edit_sidecars(visible_files)
-
-        tasks = []
-        for f in visible_files:
+        tasks: List[ExportTask] = []
+        for f in files:
             params = self._batch_params_for(f)
 
             bounds_override = None
@@ -1614,9 +1573,69 @@ class AppController(QObject):
                     metadata_config=metadata_config,
                 )
             )
+        return tasks
 
+    def _dispatch_preset_export(self, files: list[dict], *, confirm: bool) -> None:
+        if not files:
+            return
+
+        presets = self._enabled_presets()
+        if not presets:
+            QMessageBox.information(None, "No presets enabled", "Enable at least one export preset in the Export panel.")
+            return
+
+        if not self._validate_preset_paths(presets):
+            return
+
+        if confirm:
+            n_frames = len(files)
+            n_presets = len(presets)
+            n_files = n_frames * n_presets
+            frame_word = "frame" if n_frames == 1 else "frames"
+            preset_word = "preset" if n_presets == 1 else "presets"
+            file_word = "file" if n_files == 1 else "files"
+            reply = QMessageBox.question(
+                None,
+                "Export All Presets",
+                f"Export {n_frames} {frame_word} through {n_presets} {preset_word} ({n_files} {file_word})?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        if self.state.config.export.export_sidecars_enabled:
+            self._write_edit_sidecars(files)
+
+        tasks = self._build_preset_export_tasks(files, presets)
         if tasks:
             self._run_export_tasks(tasks)
+
+    def request_preset_export(self) -> None:
+        """Initiates high-resolution export for the current file using enabled presets."""
+        if not self.state.current_file_path:
+            return
+
+        file_info = {
+            "name": os.path.basename(self.state.current_file_path),
+            "path": self.state.current_file_path,
+            "hash": self.state.current_file_hash,
+        }
+        self._dispatch_preset_export([file_info], confirm=False)
+
+    def request_preset_export_selected(self) -> None:
+        """Initiates preset export for every selected filmstrip frame."""
+        files = self._preset_export_files_for_selection()
+        self._dispatch_preset_export(files, confirm=False)
+
+    def request_preset_batch_export(self) -> None:
+        """Initiates batch export for all visible files using enabled presets."""
+        visible_files = [
+            self.state.uploaded_files[i]
+            for i in self.session.asset_model.visible_actual_indices_ordered()
+            if not self.state.uploaded_files[i].get("excluded")
+        ]
+        self._dispatch_preset_export(visible_files, confirm=True)
 
     def _contact_sheet_output_dir(self, visible_files: list) -> Optional[str]:
         """Resolve the contact sheet output folder (custom path or export destination rules)."""

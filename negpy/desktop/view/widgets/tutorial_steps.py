@@ -359,8 +359,8 @@ def build(window: "MainWindow") -> list[TutorialStep]:
                 "pick a colour space, and set resolution or print size. The <b>ICC</b> section adds "
                 "monitor-profile display and soft-proofing.<br><br>"
                 "<b>Export Presets</b> save named configurations for one-click batch output — "
-                "the main button exports the current frame through every enabled preset; "
-                "the menu arrow exports all visible frames the same way. "
+                "the main button exports the selected filmstrip frames through every enabled preset; "
+                "the menu arrow offers the current frame or all visible frames. "
                 "<b>Contact Sheet</b> renders all frames into one sheet. Export always runs at full "
                 "RAW resolution; <b>Export All</b> processes every loaded file."
             ),
