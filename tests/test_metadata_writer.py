@@ -4,6 +4,9 @@ embedded thumbnail + multi-KB MakerNote that piexif.insert can't pack into one s
 """
 
 import io
+import shutil
+import subprocess
+from pathlib import Path
 
 import piexif
 import pytest
@@ -11,12 +14,75 @@ from PIL import Image
 
 from negpy.features.metadata.models import MetadataConfig
 from negpy.features.metadata.writer import embed_metadata
+from negpy.infrastructure.loaders.helpers import read_exif_from_file
+
+_TEST_IMGS = Path(r"c:\Users\jbone\Desktop\TestImgs")
+_NEF_FIXTURES = sorted(_TEST_IMGS.glob("*.NEF")) if _TEST_IMGS.is_dir() else []
+
+_RAW_PREVIEW_0TH_TAGS = (330, 273, 279, 256, 257, 513, 514)
 
 
 def _jpeg() -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (16, 16), (128, 0, 0)).save(buf, "JPEG")
     return buf.getvalue()
+
+
+def test_embed_strips_raw_preview_ifd_tags_from_jpeg() -> None:
+    """RAW EXIF carries embedded preview IFD0 tags that break ExifTool on exported JPEGs."""
+    source_exif = {
+        "0th": {
+            piexif.ImageIFD.Make: b"NIKON CORPORATION",
+            piexif.ImageIFD.Model: b"NIKON D750",
+            330: (12894, 13012, 13238),
+            273: 210440,
+            279: 57600,
+            256: 160,
+            257: 120,
+            513: 999,
+            514: 12345,
+        },
+        "Exif": {piexif.ExifIFD.FocalLengthIn35mmFilm: 60},
+        "GPS": {},
+        "Interop": {},
+        "1st": {},
+    }
+
+    out = embed_metadata(_jpeg(), MetadataConfig(), source_exif)
+
+    loaded = piexif.load(out)
+    zeroth = loaded["0th"]
+    for tag in _RAW_PREVIEW_0TH_TAGS:
+        assert tag not in zeroth
+    assert zeroth[piexif.ImageIFD.Make] == b"NIKON CORPORATION"
+    assert loaded["Exif"][piexif.ExifIFD.FocalLengthIn35mmFilm] == 60
+
+
+@pytest.mark.skipif(not shutil.which("exiftool"), reason="exiftool not installed")
+@pytest.mark.skipif(not _NEF_FIXTURES, reason="TestImgs NEF fixtures not available")
+@pytest.mark.parametrize("nef_path", _NEF_FIXTURES, ids=lambda p: p.name)
+def test_embed_real_raw_exif_exiftool_can_write_user_comment(nef_path: Path) -> None:
+    """Regression: exported JPEG EXIF must be writable by ExifTool (issue 0.32.1)."""
+    source_exif = read_exif_from_file(str(nef_path))
+    assert source_exif is not None
+
+    jpeg = embed_metadata(_jpeg(), MetadataConfig(), source_exif)
+    loaded = piexif.load(jpeg)
+    for tag in _RAW_PREVIEW_0TH_TAGS:
+        assert tag not in loaded["0th"]
+
+    tmp = nef_path.parent / "negpy_export_test" / f"{nef_path.stem}_verify.jpg"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_bytes(jpeg)
+
+    result = subprocess.run(
+        ["exiftool", "-overwrite_original", "-UserComment=foo", str(tmp)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert "Error" not in (result.stderr or "")
 
 
 def test_embed_handles_oversized_exif_without_dropping_metadata() -> None:
