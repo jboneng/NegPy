@@ -140,6 +140,41 @@ def _sanitize_exif(exif_dict: dict) -> dict:
     return result
 
 
+# IFD0 tags copied from an embedded RAW preview/thumbnail IFD. Valid inside the RAW
+# container but invalid in a standalone JPEG APP1 block — ExifTool fails with
+# "Can't read SubIFD data" / "Error reading StripOffsets data" when they remain.
+_JPEG_STRIP_0TH = frozenset(
+    {
+        254,  # NewSubfileType
+        256,
+        257,
+        258,
+        259,
+        262,  # preview image structure
+        273,
+        277,
+        278,
+        279,
+        284,  # strip layout
+        330,  # SubIFDs
+        513,
+        514,  # JpegIFOffset / JpegIFByteCount
+    }
+)
+
+
+def _prepare_jpeg_exif(exif_dict: dict) -> dict:
+    """Sanitize source EXIF and drop RAW preview IFD baggage before JPEG serialization."""
+    prepared = _sanitize_exif(exif_dict)
+    prepared.pop("thumbnail", None)
+    prepared["1st"] = {}
+    zeroth = prepared.get("0th")
+    if isinstance(zeroth, dict):
+        for tag in _JPEG_STRIP_0TH:
+            zeroth.pop(tag, None)
+    return prepared
+
+
 def embed_metadata(
     image_bytes: bytes,
     config: MetadataConfig,
@@ -209,7 +244,7 @@ def _dump_exif_within_app1_limit(merged: dict, config: MetadataConfig) -> bytes:
     ImageDescription) still overflows, falls back to NegPy's own small fields, and finally
     to orientation-only — which is guaranteed to fit, so piexif.insert can never overflow.
     """
-    candidate = _sanitize_exif(merged)
+    candidate = _prepare_jpeg_exif(merged)
 
     def _fits() -> Optional[bytes]:
         # Treat both an oversized result and a dump failure (e.g. malformed source
@@ -224,30 +259,23 @@ def _dump_exif_within_app1_limit(merged: dict, config: MetadataConfig) -> bytes:
     if exif_bytes is not None:
         return exif_bytes
 
-    # 1) Drop the embedded thumbnail (largest blob, and it'd be the un-edited source anyway).
-    candidate.pop("thumbnail", None)
-    candidate["1st"] = {}
-    exif_bytes = _fits()
-    if exif_bytes is not None:
-        return exif_bytes
-
-    # 2) Drop MakerNote (can be tens of KB on some bodies).
+    # 1) Drop MakerNote (can be tens of KB on some bodies).
     if isinstance(candidate.get("Exif"), dict):
         candidate["Exif"].pop(piexif.ExifIFD.MakerNote, None)
     exif_bytes = _fits()
     if exif_bytes is not None:
         return exif_bytes
 
-    # 3) Source EXIF still too big (e.g. a bloated ImageDescription/XMP/GPS): discard it and
+    # 2) Source EXIF still too big (e.g. a bloated ImageDescription/XMP/GPS): discard it and
     #    keep only NegPy's own fields, which are always small.
     _log.warning("source EXIF too large for JPEG APP1; keeping only NegPy metadata")
-    candidate = _sanitize_exif(_build_custom_exif(config))
+    candidate = _prepare_jpeg_exif(_build_custom_exif(config))
     candidate.setdefault("0th", {})[piexif.ImageIFD.Orientation] = 1
     exif_bytes = _fits()
     if exif_bytes is not None:
         return exif_bytes
 
-    # 4) Absolute floor — orientation only. Cannot exceed the limit.
+    # 3) Absolute floor — orientation only. Cannot exceed the limit.
     candidate = {"0th": {piexif.ImageIFD.Orientation: 1}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}}
     return piexif.dump(candidate)
 
