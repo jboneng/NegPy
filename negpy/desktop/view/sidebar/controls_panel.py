@@ -204,14 +204,20 @@ class ControlsPanel(QWidget):
                 [self.geometry_section, self.flatfield_section],
                 ["geometry_section", "flatfield_section"],
             ),
-            ("tone", "fa5s.sun", "Exposure — Colour, Tone", [self.colour_section, self.tone_section], ["colour_section", "tone_section"]),
+            (
+                "tone",
+                "fa5s.sun",
+                "Exposure — Colour, Tone, Dodge & Burn",
+                [self.colour_section, self.tone_section, self.local_section],
+                ["colour_section", "tone_section", "local_section"],
+            ),
             ("color", "fa5s.palette", "Color — Lab, Toning", [self.lab_section, self.toning_section], ["lab_section", "toning_section"]),
             (
                 "finish",
                 "fa5s.brush",
-                "Finish — Retouch, Dodge & Burn, Finishing",
-                [self.retouch_section, self.local_section, self.finish_section],
-                ["retouch_section", "local_section", "finish_section"],
+                "Finish — Retouch, Finishing",
+                [self.retouch_section, self.finish_section],
+                ["retouch_section", "finish_section"],
             ),
         ]
 
@@ -489,13 +495,13 @@ class ControlsPanel(QWidget):
 
         ton.selenium_slider.setToolTip(
             tooltip_with_shortcut(
-                "Simulates selenium toning — adds a cool blue-purple cast to shadows. B&W mode only",
+                "Simulates selenium toning — converts the densest silver first: deeper blacks, cool eggplant shadows. B&W mode only",
                 ["selenium_inc", "selenium_dec"],
             )
         )
         ton.sepia_slider.setToolTip(
             tooltip_with_shortcut(
-                "Simulates sepia toning — adds a warm brown cast across the full tonal range. B&W mode only",
+                "Simulates sepia bleach-redevelop toning — warms the highlights first while shadows hold. B&W mode only",
                 ["sepia_inc", "sepia_dec"],
             )
         )
