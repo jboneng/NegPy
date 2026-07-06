@@ -1,30 +1,28 @@
-"""Pure functions to embed custom metadata into exported image bytes via piexif."""
+"""Pure functions to embed custom metadata into exported image bytes via piexif + XMP."""
 
+import copy
 import io
 import logging
 import re
+import struct
 from fractions import Fraction
 from typing import Optional
 
 import piexif
 import tifffile
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
+from negpy.features.metadata.exif_read import strip_scan_exif_for_capture
+from negpy.features.metadata.gear_models import GearLibrary
 from negpy.features.metadata.models import MetadataConfig
+from negpy.features.metadata.payload import NEGPY_SOFTWARE, MetadataPayload, build_metadata_payload
+from negpy.features.metadata.xmp import build_xmp_bytes
+from negpy.services.assets.gear import GearProfiles
 
 _log = logging.getLogger(__name__)
 
-
-# Push/pull label mapping
-PUSH_PULL_LABELS = {
-    -3: "Pull -3",
-    -2: "Pull -2",
-    -1: "Pull -1",
-    0: "Normal",
-    1: "Push +1",
-    2: "Push +2",
-    3: "Push +3",
-}
+_XMP_APP1_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
+_TIFF_XMP_TAG = 700  # XMLPacket
 
 
 def _parse_exposure_str(text: str) -> dict:
@@ -66,57 +64,79 @@ def _parse_exposure_str(text: str) -> dict:
     return result
 
 
-def _build_custom_exif(config: MetadataConfig) -> dict:
-    """Build a piexif-format EXIF dict containing only the custom metadata fields."""
+def _rational_tuple(value: float) -> tuple[int, int]:
+    f = Fraction(value).limit_denominator(1000)
+    return f.numerator, f.denominator
+
+
+def _apex_from_f_number(f_number: float) -> float:
+    import math
+
+    return 2.0 * math.log(f_number, 2.0)
+
+
+def _exif_ascii(text: str) -> bytes:
+    return text.encode("ascii", errors="replace")
+
+
+def _build_custom_exif(payload: MetadataPayload) -> dict:
+    """Build a piexif-format EXIF dict from a resolved metadata payload."""
 
     zeroth: dict = {}
     exif: dict = {}
+    flags = payload.exif_flags
 
-    if config.film:
-        zeroth[piexif.ImageIFD.ImageDescription] = config.film
+    if payload.image_description:
+        zeroth[piexif.ImageIFD.ImageDescription] = _exif_ascii(payload.image_description)
+    elif payload.film_stock:
+        zeroth[piexif.ImageIFD.ImageDescription] = _exif_ascii(payload.film_stock)
 
-    if config.scanning:
-        zeroth[piexif.ImageIFD.Software] = config.scanning
+    zeroth[piexif.ImageIFD.Software] = _exif_ascii(NEGPY_SOFTWARE)
 
-    # Pack film/format/developer/push_pull into UserComment
-    user_comment_parts = {}
-    if config.film:
-        user_comment_parts["film"] = config.film
-    fmt_value = config.format_other if config.format == "Other" else config.format
-    if fmt_value:
-        user_comment_parts["format"] = fmt_value
-    if config.developer:
-        user_comment_parts["developer"] = config.developer
-    if config.push_pull != 0:
-        user_comment_parts["push_pull"] = PUSH_PULL_LABELS.get(config.push_pull, str(config.push_pull))
+    if flags.camera:
+        if payload.camera_make:
+            zeroth[piexif.ImageIFD.Make] = _exif_ascii(payload.camera_make)
+        if payload.camera_model:
+            zeroth[piexif.ImageIFD.Model] = _exif_ascii(payload.camera_model)
+
+    if flags.lens:
+        if payload.lens_make:
+            exif[piexif.ExifIFD.LensMake] = _exif_ascii(payload.lens_make)
+        if payload.lens_model:
+            exif[piexif.ExifIFD.LensModel] = _exif_ascii(payload.lens_model)
+        if payload.focal_length_mm is not None:
+            exif[piexif.ExifIFD.FocalLength] = _rational_tuple(payload.focal_length_mm)
+        if payload.max_aperture is not None:
+            exif[piexif.ExifIFD.FNumber] = _rational_tuple(payload.max_aperture)
+            exif[piexif.ExifIFD.MaxApertureValue] = _rational_tuple(_apex_from_f_number(payload.max_aperture))
+
+    if flags.film_iso and payload.iso is not None:
+        exif[piexif.ExifIFD.ISOSpeedRatings] = payload.iso
+
+    user_comment_parts: dict[str, str] = {}
+    if payload.film_stock:
+        user_comment_parts["film"] = payload.film_stock
+    if payload.film_format:
+        user_comment_parts["format"] = payload.film_format
+    if payload.developer:
+        user_comment_parts["developer"] = payload.developer
+    if payload.push_pull and payload.push_pull != "Normal":
+        user_comment_parts["push_pull"] = payload.push_pull
 
     if user_comment_parts:
-        # EXIF UserComment: 8-byte character code prefix + encoded content.
-        # ASCII prefix is universally supported; UNICODE/UTF-16-LE causes garbled
-        # output in most EXIF readers (ExifTool, macOS Preview, Lightroom).
         lines = [f"{k.replace('_', ' ').title()}: {v}" for k, v in user_comment_parts.items()]
         uc_bytes = b"ASCII\x00\x00\x00" + "\n".join(lines).encode("ascii")
         exif[piexif.ExifIFD.UserComment] = uc_bytes
 
-    # ── EXIF field overrides ─────────────────────────────────────────────
-    if config.camera_override:
-        zeroth[piexif.ImageIFD.Model] = config.camera_override
-
-    if config.lens_override:
-        exif[piexif.ExifIFD.LensModel] = config.lens_override
-
-    if config.exposure_override:
-        parsed = _parse_exposure_str(config.exposure_override)
-        exif.update(parsed)
+    if flags.exposure and payload.capture_exposure:
+        exif.update(_parse_exposure_str(payload.capture_exposure))
 
     return {"0th": zeroth, "Exif": exif, "GPS": {}, "Interop": {}, "1st": {}}
 
 
 def _sanitize_exif(exif_dict: dict) -> dict:
-    """Drop entries piexif can't serialize: RATIONAL/SRATIONAL stored as raw bytes, and
-    SHORT tags whose (malformed) value overflows 0..65535. ASCII tags (type 2) legitimately
-    use bytes and are left untouched."""
-    _RATIONAL_TYPES = {5, 10}  # RATIONAL, SRATIONAL
+    """Drop entries piexif can't serialize."""
+    _RATIONAL_TYPES = {5, 10}
 
     def _short_overflows(value) -> bool:
         vals = value if isinstance(value, (tuple, list)) else (value,)
@@ -133,38 +153,21 @@ def _sanitize_exif(exif_dict: dict) -> dict:
             tag_type = tags_info.get(tag, {}).get("type")
             if isinstance(value, bytes) and tag_type in _RATIONAL_TYPES:
                 continue
-            if tag_type == 3 and _short_overflows(value):  # SHORT out of range
+            if tag_type == 3 and _short_overflows(value):
                 continue
             clean[tag] = value
         result[ifd_name] = clean
     return result
 
 
-# IFD0 tags copied from an embedded RAW preview/thumbnail IFD. Valid inside the RAW
-# container but invalid in a standalone JPEG APP1 block — ExifTool fails with
-# "Can't read SubIFD data" / "Error reading StripOffsets data" when they remain.
 _JPEG_STRIP_0TH = frozenset(
     {
-        254,  # NewSubfileType
-        256,
-        257,
-        258,
-        259,
-        262,  # preview image structure
-        273,
-        277,
-        278,
-        279,
-        284,  # strip layout
-        330,  # SubIFDs
-        513,
-        514,  # JpegIFOffset / JpegIFByteCount
+        254, 256, 257, 258, 259, 262, 273, 277, 278, 279, 284, 330, 513, 514,
     }
 )
 
 
 def _prepare_jpeg_exif(exif_dict: dict) -> dict:
-    """Sanitize source EXIF and drop RAW preview IFD baggage before JPEG serialization."""
     prepared = _sanitize_exif(exif_dict)
     prepared.pop("thumbnail", None)
     prepared["1st"] = {}
@@ -175,80 +178,141 @@ def _prepare_jpeg_exif(exif_dict: dict) -> dict:
     return prepared
 
 
+def _resolve_payload(
+    config: MetadataConfig,
+    gear: Optional[GearLibrary],
+    source_exif: Optional[dict],
+) -> MetadataPayload:
+    if gear is None:
+        gear = GearProfiles.load_library()
+    return build_metadata_payload(config, gear, source_exif)
+
+
 def embed_metadata(
     image_bytes: bytes,
     config: MetadataConfig,
     source_exif: Optional[dict],
+    gear: Optional[GearLibrary] = None,
 ) -> bytes:
     """
-    Insert custom metadata + preserved source EXIF into exported image bytes.
-
-    Args:
-        image_bytes: JPEG or TIFF image bytes from the rendering pipeline.
-        config: MetadataConfig with user-entered custom fields.
-        source_exif: piexif-format EXIF dict from the source file (or None).
-
-    Returns:
-        Image bytes with embedded metadata.
+    Insert custom metadata + preserved source EXIF + XMP into exported image bytes.
     """
-    # Start with source EXIF if available, otherwise empty shell
+    payload = _resolve_payload(config, gear, source_exif)
+
     if source_exif is not None:
-        merged = source_exif
+        merged = copy.deepcopy(source_exif)
     else:
         merged = {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}}
 
-    # Overlay custom metadata
-    custom = _build_custom_exif(config)
+    if payload.exif_flags.strip_scan_residuals:
+        strip_scan_exif_for_capture(merged)
+
+    custom = _build_custom_exif(payload)
     for ifd_name in ("0th", "Exif", "GPS", "Interop", "1st"):
         if ifd_name in custom and custom[ifd_name]:
             if ifd_name not in merged:
                 merged[ifd_name] = {}
             merged[ifd_name].update(custom[ifd_name])
 
-    # Pixels are exported upright; declare normal orientation so viewers don't re-rotate.
     merged.setdefault("0th", {})[piexif.ImageIFD.Orientation] = 1
     if isinstance(merged.get("1st"), dict):
         merged["1st"].pop(piexif.ImageIFD.Orientation, None)
 
+    xmp_bytes = build_xmp_bytes(payload) if payload.has_any_data() else None
+
     try:
         output = io.BytesIO()
         if image_bytes[:2] == b"\xff\xd8":
-            # JPEG APP1 (EXIF) must fit in a single 64 KB segment.
-            exif_bytes = _dump_exif_within_app1_limit(merged, config)
-            piexif.insert(exif_bytes, image_bytes, output)
+            exif_bytes = _dump_exif_within_app1_limit(merged, payload)
+            jpeg_buf = io.BytesIO()
+            piexif.insert(exif_bytes, image_bytes, jpeg_buf)
+            jpeg_with_exif = jpeg_buf.getvalue()
+            output = io.BytesIO()
+            result = _inject_jpeg_xmp(jpeg_with_exif, xmp_bytes) if xmp_bytes else jpeg_with_exif
+            output.write(result)
         elif image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-            # PNG stores EXIF in an eXIf chunk (no 64 KB cap); Pillow writes it.
             exif_bytes = piexif.dump(_sanitize_exif(merged))
-            _rewrite_png_with_metadata(image_bytes, exif_bytes, output)
+            _rewrite_png_with_metadata(image_bytes, exif_bytes, output, xmp_bytes)
         else:
-            # TIFF has no 64 KB EXIF cap (tifffile writes a separate IFD).
             exif_bytes = piexif.dump(_sanitize_exif(merged))
-            _rewrite_tiff_with_metadata(image_bytes, exif_bytes, output)
+            _rewrite_tiff_with_metadata(image_bytes, exif_bytes, output, xmp_bytes)
         return output.getvalue()
     except Exception:
         _log.warning("metadata embed failed", exc_info=True)
         return image_bytes
 
 
-# JPEG APP1 segment is 2 bytes for the length field (incl. itself) → 65535 max,
-# leaving 65533 for the EXIF payload that piexif.insert prefixes with \xff\xe1+len.
 _APP1_EXIF_LIMIT = 65533
 
 
-def _dump_exif_within_app1_limit(merged: dict, config: MetadataConfig) -> bytes:
-    """
-    Serialize EXIF for a JPEG so it always fits the 64 KB APP1 segment.
+def _strip_jpeg_xmp_segments(data: bytes) -> bytes:
+    out = bytearray(data[:2])
+    i = 2
+    n = len(data)
+    while i < n:
+        if data[i] != 0xFF:
+            out.extend(data[i:])
+            break
+        marker = data[i + 1]
+        if marker == 0xD9:
+            out.extend(data[i:])
+            break
+        if marker in range(0xD0, 0xD8):
+            out.extend(data[i : i + 2])
+            i += 2
+            continue
+        if i + 4 > n:
+            out.extend(data[i:])
+            break
+        seg_len = struct.unpack(">H", data[i + 2 : i + 4])[0]
+        seg_end = i + 2 + seg_len
+        if marker == 0xE1 and seg_end <= n:
+            payload_start = i + 4
+            if data[payload_start : payload_start + len(_XMP_APP1_HEADER)] == _XMP_APP1_HEADER:
+                i = seg_end
+                continue
+        out.extend(data[i:seg_end])
+        i = seg_end
+    return bytes(out)
 
-    Tries to keep as much source EXIF as fits, dropping the usual offenders first
-    (thumbnail, then MakerNote). If a non-standard large tag (e.g. embedded XMP in
-    ImageDescription) still overflows, falls back to NegPy's own small fields, and finally
-    to orientation-only — which is guaranteed to fit, so piexif.insert can never overflow.
-    """
+
+def _inject_jpeg_xmp(jpeg_bytes: bytes, xmp_bytes: bytes) -> bytes:
+    """Insert or replace an XMP APP1 segment in a JPEG."""
+    if not xmp_bytes:
+        return jpeg_bytes
+    cleaned = _strip_jpeg_xmp_segments(jpeg_bytes)
+    payload = _XMP_APP1_HEADER + xmp_bytes
+    seg_len = len(payload) + 2
+    if seg_len > 65535:
+        _log.warning("XMP packet too large for JPEG APP1; skipping XMP embed")
+        return jpeg_bytes
+    xmp_segment = b"\xff\xe1" + struct.pack(">H", seg_len) + payload
+    insert_at = 2
+    i = 2
+    n = len(cleaned)
+    while i < n:
+        if cleaned[i] != 0xFF:
+            break
+        marker = cleaned[i + 1]
+        if marker in range(0xD0, 0xD8):
+            i += 2
+            continue
+        if i + 4 > n:
+            break
+        seg_len = struct.unpack(">H", cleaned[i + 2 : i + 4])[0]
+        seg_end = i + 2 + seg_len
+        if marker in (0xE0, 0xE1, 0xED, 0xFE):
+            insert_at = seg_end
+            i = seg_end
+            continue
+        break
+    return cleaned[:insert_at] + xmp_segment + cleaned[insert_at:]
+
+
+def _dump_exif_within_app1_limit(merged: dict, payload: MetadataPayload) -> bytes:
     candidate = _prepare_jpeg_exif(merged)
 
     def _fits() -> Optional[bytes]:
-        # Treat both an oversized result and a dump failure (e.g. malformed source
-        # thumbnail) as "needs more trimming".
         try:
             b = piexif.dump(candidate)
         except Exception:
@@ -259,35 +323,26 @@ def _dump_exif_within_app1_limit(merged: dict, config: MetadataConfig) -> bytes:
     if exif_bytes is not None:
         return exif_bytes
 
-    # 1) Drop MakerNote (can be tens of KB on some bodies).
     if isinstance(candidate.get("Exif"), dict):
         candidate["Exif"].pop(piexif.ExifIFD.MakerNote, None)
     exif_bytes = _fits()
     if exif_bytes is not None:
         return exif_bytes
 
-    # 2) Source EXIF still too big (e.g. a bloated ImageDescription/XMP/GPS): discard it and
-    #    keep only NegPy's own fields, which are always small.
     _log.warning("source EXIF too large for JPEG APP1; keeping only NegPy metadata")
-    candidate = _prepare_jpeg_exif(_build_custom_exif(config))
+    candidate = _prepare_jpeg_exif(_build_custom_exif(payload))
     candidate.setdefault("0th", {})[piexif.ImageIFD.Orientation] = 1
     exif_bytes = _fits()
     if exif_bytes is not None:
         return exif_bytes
 
-    # 3) Absolute floor — orientation only. Cannot exceed the limit.
     candidate = {"0th": {piexif.ImageIFD.Orientation: 1}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}}
     return piexif.dump(candidate)
 
 
-# TIFF type codes we know how to map onto tifffile extratags.
-_TIFF_TYPE_SCALAR = {3, 4, 8, 9}  # SHORT, LONG, SSHORT, SLONG
-_TIFF_TYPE_RATIONAL = {5, 10}  # RATIONAL, SRATIONAL
-
-# Tags tifffile owns. TAG_FILTERED covers the core image IFD (and the EXIF/GPS
-# sub-IFD pointers, conveniently); the rest correspond to tifffile.imwrite
-# kwargs we already pass (description, resolution, software, iccprofile).
-_TIFFFILE_RESERVED_TAGS: set[int] = set(tifffile.TIFF.TAG_FILTERED) | {270, 282, 283, 296, 305, 34675}
+_TIFF_TYPE_SCALAR = {3, 4, 8, 9}
+_TIFF_TYPE_RATIONAL = {5, 10}
+_TIFFFILE_RESERVED_TAGS: set[int] = set(tifffile.TIFF.TAG_FILTERED) | {270, 282, 283, 296, 305, 34675, _TIFF_XMP_TAG}
 
 
 def _decode_ascii(value: object) -> str | None:
@@ -299,13 +354,6 @@ def _decode_ascii(value: object) -> str | None:
 
 
 def _exif_bytes_to_extratags(exif_bytes: bytes) -> tuple[str | None, list[tuple]]:
-    """Flatten a piexif EXIF block into ``(description, extratags)`` for tifffile.
-
-    EXIF/GPS sub-IFD entries are hoisted into the main IFD because tifffile
-    has no API for writing sub-IFDs, and PIL's own ``exif=`` path is broken
-    for TIFF (see ``_rewrite_tiff_with_metadata``). The description is split
-    out so it can be passed via ``description=`` instead of ``extratags``.
-    """
     exif_dict = piexif.load(exif_bytes)
     description = _decode_ascii(exif_dict.get("0th", {}).get(piexif.ImageIFD.ImageDescription))
 
@@ -327,14 +375,13 @@ def _exif_bytes_to_extratags(exif_bytes: bytes) -> tuple[str | None, list[tuple]
 
 
 def _build_extratag(tag: int, ttype: int, value: object) -> tuple | None:
-    """Coerce a piexif value into a tifffile extratag tuple, or None if untranslatable."""
-    if ttype == 2:  # ASCII
+    if ttype == 2:
         text = _decode_ascii(value)
         if text is None:
             return None
-        return (tag, ttype, 0, text, True)  # count=0: tifffile sizes ASCII itself
+        return (tag, ttype, 0, text, True)
 
-    if ttype in (1, 7):  # BYTE, UNDEFINED
+    if ttype in (1, 7):
         if not isinstance(value, (bytes, bytearray)):
             return None
         return (tag, ttype, len(value), bytes(value), True)
@@ -350,8 +397,6 @@ def _build_extratag(tag: int, ttype: int, value: object) -> tuple | None:
         if isinstance(value, tuple) and len(value) == 2 and all(isinstance(v, int) for v in value):
             return (tag, ttype, 1, value, True)
         if isinstance(value, (list, tuple)) and all(isinstance(v, tuple) and len(v) == 2 for v in value):
-            # tifffile internally doubles count for RATIONAL and unpacks `*value`,
-            # so multi-element values must be a flat sequence of ints.
             flat = [n for pair in value for n in pair]
             return (tag, ttype, len(value), flat, True)
         return None
@@ -359,32 +404,30 @@ def _build_extratag(tag: int, ttype: int, value: object) -> tuple | None:
     return None
 
 
-def _rewrite_png_with_metadata(image_bytes: bytes, exif_bytes: bytes, output: io.BytesIO) -> None:
-    """Re-save a PNG with EXIF stored in an eXIf chunk, preserving the ICC profile.
-
-    piexif has no PNG support, so Pillow writes the eXIf chunk. The embedded ICC
-    profile is read back from the source bytes and re-attached so it survives the
-    round-trip.
-    """
+def _rewrite_png_with_metadata(
+    image_bytes: bytes,
+    exif_bytes: bytes,
+    output: io.BytesIO,
+    xmp_bytes: Optional[bytes] = None,
+) -> None:
     with Image.open(io.BytesIO(image_bytes)) as im:
         im.load()
         icc = im.info.get("icc_profile")
-        save_kwargs = {"format": "PNG", "compress_level": 6, "exif": exif_bytes}
+        pnginfo = PngImagePlugin.PngInfo()
+        if xmp_bytes:
+            pnginfo.add_itxt("XML:com.adobe.xmp", xmp_bytes.decode("utf-8"), zip=False)
+        save_kwargs: dict = {"format": "PNG", "compress_level": 6, "exif": exif_bytes, "pnginfo": pnginfo}
         if icc:
             save_kwargs["icc_profile"] = icc
         im.save(output, **save_kwargs)
 
 
-def _rewrite_tiff_with_metadata(image_bytes: bytes, exif_bytes: bytes, output: io.BytesIO) -> None:
-    """Re-encode a TIFF with EXIF metadata via tifffile.
-
-    PIL's ``img.save(format="TIFF", exif=...)`` path is doubly unusable here:
-    it writes the EXIF sub-IFD pointer as a dict-coerced LONG8 which libtiff
-    rejects with ``_TIFFVSetField: Bad LONG8 ... EXIFIFDOffset``, and it has
-    no 16-bit RGB mode so it would silently downconvert the image to 8-bit.
-    Round-tripping through tifffile preserves the pixel data; EXIF tags are
-    folded into the main IFD via ``extratags``.
-    """
+def _rewrite_tiff_with_metadata(
+    image_bytes: bytes,
+    exif_bytes: bytes,
+    output: io.BytesIO,
+    xmp_bytes: Optional[bytes] = None,
+) -> None:
     with tifffile.TiffFile(io.BytesIO(image_bytes)) as tf:
         page = tf.pages[0]
         arr = page.asarray()
@@ -394,6 +437,9 @@ def _rewrite_tiff_with_metadata(image_bytes: bytes, exif_bytes: bytes, output: i
 
     description, extratags = _exif_bytes_to_extratags(exif_bytes)
     description = _fold_user_comment_into_description(description, extratags)
+
+    if xmp_bytes:
+        extratags.append((_TIFF_XMP_TAG, 7, len(xmp_bytes), xmp_bytes, True))
 
     tifffile.imwrite(
         output,
@@ -408,21 +454,12 @@ def _rewrite_tiff_with_metadata(image_bytes: bytes, exif_bytes: bytes, output: i
 
 
 def _fold_user_comment_into_description(description: str | None, extratags: list[tuple]) -> str | None:
-    """Mirror UserComment into ImageDescription for TIFF output.
-
-    UserComment lives in the EXIF sub-IFD on JPEG, but tifffile can only emit
-    it as a main-IFD tag — and most TIFF readers (macOS Preview, Lightroom)
-    don't expose UNDEFINED main-IFD tags. Folding the text into description
-    keeps every custom field (film, format, developer, push/pull) visible.
-    """
     uc_text: str | None = None
     for entry in extratags:
         tag, _ttype, _count, value, _ = entry
         if tag != piexif.ExifIFD.UserComment or not isinstance(value, (bytes, bytearray)):
             continue
         raw = bytes(value)
-        # EXIF spec: 8-byte character-code prefix + payload. We only decode
-        # ASCII; UNICODE (UTF-16-LE) and JIS would garble under ASCII decode.
         if raw[:8] == b"ASCII\x00\x00\x00":
             uc_text = raw[8:].decode("ascii", "replace").rstrip("\x00").strip()
         break

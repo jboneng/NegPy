@@ -111,7 +111,7 @@ def test_embed_trims_oversized_nonstandard_tag_keeps_custom_fields() -> None:
         "Interop": {},
         "1st": {},
     }
-    config = MetadataConfig(camera_override="MyCam")
+    config = MetadataConfig(camera_model="MyCam")
 
     out = embed_metadata(_jpeg(), config, source_exif)
 

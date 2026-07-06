@@ -10,6 +10,7 @@ from negpy.desktop.session import DesktopSessionManager
 from negpy.desktop.view.main_window import MainWindow
 from negpy.infrastructure.storage.repository import StorageRepository
 from negpy.services.assets.crosstalk import CrosstalkProfiles
+from negpy.services.assets.gear import GearProfiles
 from negpy.kernel.system.config import APP_CONFIG, BASE_USER_DIR
 from negpy.kernel.system.logging import get_logger, setup_logging
 from negpy.kernel.system.override import apply as apply_override
@@ -50,12 +51,14 @@ def _bootstrap_environment() -> None:
         APP_CONFIG.cache_dir,
         APP_CONFIG.user_icc_dir,
         APP_CONFIG.crosstalk_dir,
+        APP_CONFIG.gear_dir,
         APP_CONFIG.contact_sheet_templates_dir,
         APP_CONFIG.default_export_dir,
     ]
     for d in dirs:
         os.makedirs(d, exist_ok=True)
     CrosstalkProfiles.seed_example()
+    GearProfiles.seed_example()
 
 
 def main() -> None:

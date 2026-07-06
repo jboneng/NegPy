@@ -71,6 +71,7 @@ params = [
     "--add-data=icc:icc",
     "--add-data=media:media",
     "--add-data=crosstalk:crosstalk",
+    "--add-data=gear:gear",
     "--add-data=VERSION:.",
 ]
 

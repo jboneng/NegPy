@@ -204,6 +204,7 @@ class RightPanel(QWidget):
         self.controller.pixel_readout_rgb.connect(self.hist_widget.set_marker)
         self.controller.tone_drag_changed.connect(self.curve_widget.set_active_param)
         self.controller.config_updated.connect(self.export_sidebar.sync_ui)
+        self.controller.config_updated.connect(self.metadata_sidebar.sync_ui)
         self.controls_panel.modified_synced.connect(self._sync_tab_edited)
 
     def _sync_tab_edited(self) -> None:

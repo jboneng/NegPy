@@ -1,4 +1,16 @@
 from dataclasses import dataclass
+from typing import Optional
+
+
+PUSH_PULL_LABELS = {
+    -3: "Pull -3",
+    -2: "Pull -2",
+    -1: "Pull -1",
+    0: "Normal",
+    1: "Push +1",
+    2: "Push +2",
+    3: "Push +3",
+}
 
 
 @dataclass(frozen=True)
@@ -8,15 +20,29 @@ class MetadataConfig:
     Empty strings = field not set (nothing written to export).
     """
 
+    # Gear library references (empty = manual entry / not linked)
+    gear_preset_id: str = ""
+    camera_id: str = ""
+    lens_id: str = ""
+    film_stock_id: str = ""
+
+    # Structured gear fields (resolved from library or manual)
+    camera_make: str = ""
+    camera_model: str = ""
+    lens_make: str = ""
+    lens_model: str = ""
+    focal_length_mm: Optional[float] = None
+    max_aperture: Optional[float] = None
+    film_iso: Optional[int] = None
+    film_manufacturer: str = ""
+    film_color_type: str = ""
+
     film: str = ""
-    format: str = ""  # "35mm" | "120" | "4x5" | "8x10" | "Other" | ""
+    format: str = ""  # "35mm" | "120" | "4×5" | "8×10" | "110" | "Other" | ""
     format_other: str = ""  # shown when format == "Other"
     developer: str = ""
     push_pull: int = 0  # -3..+3, 0 = Normal
     scanning: str = ""
     sync_to_batch: bool = False
 
-    # EXIF field overrides (editable by user, empty = use source EXIF)
-    camera_override: str = ""
-    lens_override: str = ""
-    exposure_override: str = ""
+    exposure_override: str = ""  # free-text e.g. "1/125s f/2.8 ISO 400"; empty = use source EXIF

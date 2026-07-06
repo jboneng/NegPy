@@ -210,27 +210,41 @@ ICC profile for soft-proofing in the preview and (optionally) embedding in the e
 ---
 
 ## 11. Metadata Panel
-Custom film/process metadata plus per-image overrides of EXIF inherited from the source file.
+Archival metadata for the **original analog capture** — gear, process, and scanning — written into exported JPEG, TIFF, and PNG files as EXIF and embedded XMP.
 
-### Custom
+### Original analog gear
 
-These fields are written into the exported file's metadata (XMP/EXIF as supported by the format).
+Pick gear from your library (or a saved preset). Use **Manage…** to edit cameras, lenses, film stocks, and gear presets. Starter data is seeded into `~/NegPy/gear/` on first launch.
 
-*   **Film**: Film stock name — e.g. `Portra 400`, `HP5+`.
-*   **Format**: Film format dropdown — `35mm`, `120`, `4×5`, `8×10`, or `Other`.
-*   **Format (Custom)**: Free-text field that appears only when Format = `Other` (e.g. `6×7`).
-*   **Developer**: Developer name and dilution, e.g. `D-76 1+1`.
-*   **Push / Pull**: Process push or pull from `Push +3` down to `Pull -3`, with `Normal` in the middle.
-*   **Scanning**: Scanner or scanning method, e.g. `Noritsu HS-1800`.
-*   **Sync custom metadata to all files in batch export**: When on, all files in a batch export receive these custom metadata values.
+*   **Preset**: One-click camera + lens + film combination.
+*   **Camera / Lens / Film stock**: Dropdowns from the gear library. Changing any item clears the preset selection.
+*   **Clear**: Clears gear preset and library selections for this frame.
 
-### Inherited (from source)
+Structured fields for the **original capture** (camera, lens, film ISO) are written to **standard EXIF** when you set gear in the Metadata tab — so Lightroom and other DAMs show your film camera and lens. Scan-only tags from the source file (`FocalLengthIn35mmFormat`, scan exposure/ISO, etc.) are stripped so they do not mix with capture data. The **digitization rig** (DSLR, film scanner, copy-stand setup) is preserved in `negpy:Scan*` XMP tags only.
 
-Camera, Lens, and Exposure are populated read-only from the source file's EXIF. Each has a small lock-button on the right — click it to unlock the field and override the inherited value for this specific edit. Clicking again re-locks to the EXIF source.
+If you have **not** set capture gear, standard EXIF is left as-is (your scanner or DSLR remains visible in Lightroom) and scan data is mirrored to `negpy:Scan*` XMP. Process-only fields (developer, format) never overwrite camera/lens EXIF.
 
-*   **Camera**: `Make` + `Model` from the source EXIF, or your override.
-*   **Lens**: `LensModel` from EXIF, or override.
-*   **Exposure**: Formatted exposure string (e.g. `1/125s f/2.0 ISO 400`), or override.
+Capture fields are also written to `negpy:Capture*` in XMP for structured archival access.
+
+### Process
+
+*   **Format**: Film format — `35mm`, `120`, `4×5`, `8×10`, `110`, or `Other`.
+*   **Format (Custom)**: Shown when Format = `Other` (e.g. `6×7`).
+*   **Developer**: Developer and dilution, e.g. `D-76 1+1`.
+*   **Push / Pull**: `Push +3` … `Pull -3`, with `Normal` in the middle.
+
+### Scanning
+
+*   **Scanning**: Scan method or notes (written to `negpy:ScanMethod` in XMP). EXIF `Software` is always `NegPy`.
+*   **Sync custom metadata to all files in batch export**: When on, batch export uses the current metadata tab values for every file.
+
+### Exposure
+
+Optional **original capture** exposure (shutter, aperture, film ISO). Click the lock icon to edit a free-text string (e.g. `1/125s f/2.8 ISO 400`). Scan exposure from the source file appears in the preview under **Scan**, not here.
+
+### Metadata preview
+
+Collapsible live preview grouped by **Original capture**, **Scan**, **Process**, and **File** — the tag values embedded on export.
 
 ---
 

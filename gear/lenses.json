@@ -1,0 +1,42 @@
+[
+  {
+    "id": "lens-canon-fd-50-1.4",
+    "displayName": "Canon FD 50mm f/1.4",
+    "lensModel": "FD 50mm f/1.4 S.S.C.",
+    "make": "Canon",
+    "focalLength": 50,
+    "maxAperture": 1.4
+  },
+  {
+    "id": "lens-canon-fd-28-2.8",
+    "displayName": "Canon FD 28mm f/2.8",
+    "lensModel": "FD 28mm f/2.8",
+    "make": "Canon",
+    "focalLength": 28,
+    "maxAperture": 2.8
+  },
+  {
+    "id": "lens-nikkor-50-1.8",
+    "displayName": "Nikkor 50mm f/1.8 AI-S",
+    "lensModel": "Nikkor 50mm f/1.8 AI-S",
+    "make": "Nikon",
+    "focalLength": 50,
+    "maxAperture": 1.8
+  },
+  {
+    "id": "lens-pentax-smc-50-1.7",
+    "displayName": "SMC Pentax-M 50mm f/1.7",
+    "lensModel": "SMC Pentax-M 50mm f/1.7",
+    "make": "Pentax",
+    "focalLength": 50,
+    "maxAperture": 1.7
+  },
+  {
+    "id": "lens-olympus-zuiko-50-1.8",
+    "displayName": "Olympus Zuiko 50mm f/1.8",
+    "lensModel": "Zuiko Auto-S 50mm f/1.8",
+    "make": "Olympus",
+    "focalLength": 50,
+    "maxAperture": 1.8
+  }
+]

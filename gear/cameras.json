@@ -1,0 +1,37 @@
+[
+  {
+    "id": "cam-canon-ae1p",
+    "make": "Canon",
+    "model": "AE-1 Program",
+    "displayName": "Canon AE-1 Program",
+    "notes": "35mm SLR, 1981-1987, FD mount."
+  },
+  {
+    "id": "cam-nikon-fm2",
+    "make": "Nikon",
+    "model": "FM2",
+    "displayName": "Nikon FM2",
+    "notes": "35mm fully mechanical SLR, F-mount."
+  },
+  {
+    "id": "cam-pentax-k1000",
+    "make": "Pentax",
+    "model": "K1000",
+    "displayName": "Pentax K1000",
+    "notes": "35mm mechanical SLR, K-mount."
+  },
+  {
+    "id": "cam-olympus-om1",
+    "make": "Olympus",
+    "model": "OM-1",
+    "displayName": "Olympus OM-1",
+    "notes": "35mm compact mechanical SLR, OM-mount."
+  },
+  {
+    "id": "cam-mamiya-645",
+    "make": "Mamiya",
+    "model": "M645 1000s",
+    "displayName": "Mamiya 645 1000s",
+    "notes": "Medium-format 6x4.5 SLR."
+  }
+]

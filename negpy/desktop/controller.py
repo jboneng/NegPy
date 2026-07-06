@@ -1083,6 +1083,16 @@ class AppController(QObject):
         if self.session.repo.get_global_setting("flatfield_active_profile") == name:
             self.set_active_flatfield_profile("")
 
+    def load_gear_library(self):
+        from negpy.services.assets.gear import GearProfiles
+
+        return GearProfiles.load_library()
+
+    def save_gear_library(self, library) -> None:
+        from negpy.services.assets.gear import GearProfiles
+
+        GearProfiles.save_library(library)
+
     def set_flatfield_enabled(self, enabled: bool) -> None:
         """
         Per-image toggle to enable/disable flat-field correction for the current frame.

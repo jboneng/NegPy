@@ -1,0 +1,67 @@
+[
+  {
+    "id": "film-portra-400",
+    "displayName": "Kodak Portra 400",
+    "manufacturer": "Kodak",
+    "stockName": "Portra 400",
+    "iso": 400,
+    "format": "35mm",
+    "colorType": "ColorNegative",
+    "notes": "Professional color negative, warm and gentle skin tones."
+  },
+  {
+    "id": "film-portra-160",
+    "displayName": "Kodak Portra 160",
+    "manufacturer": "Kodak",
+    "stockName": "Portra 160",
+    "iso": 160,
+    "format": "35mm",
+    "colorType": "ColorNegative"
+  },
+  {
+    "id": "film-gold-200",
+    "displayName": "Kodak Gold 200",
+    "manufacturer": "Kodak",
+    "stockName": "Gold 200",
+    "iso": 200,
+    "format": "35mm",
+    "colorType": "ColorNegative"
+  },
+  {
+    "id": "film-tri-x-400",
+    "displayName": "Kodak Tri-X 400",
+    "manufacturer": "Kodak",
+    "stockName": "Tri-X 400",
+    "iso": 400,
+    "format": "35mm",
+    "colorType": "B&W Negative"
+  },
+  {
+    "id": "film-hp5-400",
+    "displayName": "Ilford HP5 Plus",
+    "manufacturer": "Ilford",
+    "stockName": "HP5 Plus 400",
+    "iso": 400,
+    "format": "35mm",
+    "colorType": "B&W Negative"
+  },
+  {
+    "id": "film-ektachrome-e100",
+    "displayName": "Kodak Ektachrome E100",
+    "manufacturer": "Kodak",
+    "stockName": "Ektachrome E100",
+    "iso": 100,
+    "format": "35mm",
+    "colorType": "ColorSlide"
+  },
+  {
+    "id": "film-cinestill-800t",
+    "displayName": "CineStill 800T",
+    "manufacturer": "CineStill",
+    "stockName": "800T",
+    "iso": 800,
+    "format": "35mm",
+    "colorType": "ColorNegative",
+    "notes": "Tungsten-balanced color negative with characteristic halation."
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "preset-ae1p-fd50-portra400",
+    "displayName": "AE-1P / FD 50 f/1.4 / Portra 400",
+    "cameraId": "cam-canon-ae1p",
+    "lensId": "lens-canon-fd-50-1.4",
+    "filmStockId": "film-portra-400"
+  },
+  {
+    "id": "preset-fm2-50-trix",
+    "displayName": "FM2 / Nikkor 50 f/1.8 / Tri-X 400",
+    "cameraId": "cam-nikon-fm2",
+    "lensId": "lens-nikkor-50-1.8",
+    "filmStockId": "film-tri-x-400"
+  }
+]

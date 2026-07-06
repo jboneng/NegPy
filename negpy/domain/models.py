@@ -327,6 +327,24 @@ class WorkspaceConfig:
         else:
             data.pop("same_as_source", None)
 
+        # Metadata: migrate legacy combined override fields to structured gear fields.
+        if data.get("camera_override") and not data.get("camera_model"):
+            co = str(data.pop("camera_override", "")).strip()
+            if co and not data.get("camera_make"):
+                parts = co.split(None, 1)
+                if len(parts) == 2:
+                    data["camera_make"], data["camera_model"] = parts[0], parts[1]
+                else:
+                    data["camera_model"] = co
+            elif co:
+                data["camera_model"] = co
+        else:
+            data.pop("camera_override", None)
+        if data.get("lens_override") and not data.get("lens_model"):
+            data["lens_model"] = str(data.pop("lens_override", "")).strip()
+        else:
+            data.pop("lens_override", None)
+
         config_classes = [
             ProcessConfig,
             ExposureConfig,
