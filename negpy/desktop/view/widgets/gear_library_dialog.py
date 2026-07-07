@@ -263,8 +263,6 @@ class GearLibraryDialog(QDialog):
         self._category = _CATEGORIES[row][0]
         self._rebuild_item_list()
         self._show_form_for_category(self._category)
-        if self._category == "gear_presets":
-            self._refresh_preset_combos()
 
     def _rebuild_item_list(self) -> None:
         self.item_list.blockSignals(True)
