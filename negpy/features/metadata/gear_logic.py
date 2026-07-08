@@ -3,27 +3,83 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Optional
+from typing import Optional, Union
 
-from negpy.features.metadata.gear_models import GearLibrary
+from negpy.features.metadata.gear_models import Camera, FilmStock, GearLibrary, GearPreset, Lens
 from negpy.features.metadata.models import MetadataConfig
+
+GearItem = Union[Camera, Lens, FilmStock, GearPreset]
+
+
+def gear_search_text(item: GearItem, library: Optional[GearLibrary] = None) -> str:
+    """Lowercase searchable text for substring filtering."""
+    parts: list[str] = []
+
+    if isinstance(item, Camera):
+        parts = [item.display_name, item.make, item.model, item.notes]
+    elif isinstance(item, Lens):
+        parts = [item.display_name, item.make, item.lens_model, item.notes]
+        if item.focal_length_mm is not None:
+            parts.append(f"{item.focal_length_mm:g}")
+        if item.max_aperture is not None:
+            parts.append(f"{item.max_aperture:g}")
+    elif isinstance(item, FilmStock):
+        parts = [
+            item.display_name,
+            item.manufacturer,
+            item.stock_name,
+            item.notes,
+            str(item.iso),
+            item.format.value,
+            item.color_type.value,
+        ]
+    elif isinstance(item, GearPreset):
+        parts = [item.display_name, item.notes]
+        if library is not None:
+            cam = library.get_camera(item.camera_id)
+            lens = library.get_lens(item.lens_id)
+            stock = library.get_film_stock(item.film_stock_id)
+            if cam:
+                parts.extend([cam.resolved_display_name, cam.make, cam.model])
+            if lens:
+                parts.extend([lens.resolved_display_name, lens.make, lens.lens_model])
+            if stock:
+                parts.extend([stock.resolved_display_name, stock.manufacturer, stock.stock_name])
+
+    return " ".join(p.strip() for p in parts if p and str(p).strip()).lower()
+
+
+def matches_gear_filter(item: GearItem, query: str, library: Optional[GearLibrary] = None) -> bool:
+    needle = query.strip().lower()
+    if not needle:
+        return True
+    return needle in gear_search_text(item, library)
 
 
 def metadata_from_gear(
     config: MetadataConfig,
     library: GearLibrary,
     *,
-    gear_preset_id: str = "",
-    camera_id: str = "",
-    lens_id: str = "",
-    film_stock_id: str = "",
+    gear_preset_id: Optional[str] = None,
+    camera_id: Optional[str] = None,
+    lens_id: Optional[str] = None,
+    film_stock_id: Optional[str] = None,
     clear_preset: bool = False,
 ) -> MetadataConfig:
-    """Build updated MetadataConfig from gear library selections."""
-    preset_id = "" if clear_preset else (gear_preset_id or config.gear_preset_id)
-    cam_id = camera_id if camera_id != "" else config.camera_id
-    lens_id_val = lens_id if lens_id != "" else config.lens_id
-    film_id = film_stock_id if film_stock_id != "" else config.film_stock_id
+    """Build updated MetadataConfig from gear library selections.
+
+    Pass ``None`` (default) to leave an id unchanged; pass ``""`` to clear it.
+    """
+    if clear_preset:
+        preset_id = ""
+    elif gear_preset_id is not None:
+        preset_id = gear_preset_id
+    else:
+        preset_id = config.gear_preset_id
+
+    cam_id = config.camera_id if camera_id is None else camera_id
+    lens_id_val = config.lens_id if lens_id is None else lens_id
+    film_id = config.film_stock_id if film_stock_id is None else film_stock_id
 
     if preset_id:
         preset = library.get_gear_preset(preset_id)

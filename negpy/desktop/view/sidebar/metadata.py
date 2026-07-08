@@ -18,6 +18,7 @@ from negpy.desktop.view.styles.templates import field_label, section_subheader
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
 from negpy.desktop.view.widgets.gear_library_dialog import GearLibraryDialog
+from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
 from negpy.features.metadata.gear_logic import metadata_from_gear
 from negpy.features.metadata.gear_models import GearLibrary
 from negpy.features.metadata.payload import build_metadata_payload
@@ -26,8 +27,6 @@ from negpy.services.assets.gear import GearProfiles
 FORMAT_OPTIONS = ["35mm", "120", "4×5", "8×10", "110", "Other"]
 PUSH_PULL_OPTIONS = ["Push +3", "Push +2", "Push +1", "Normal", "Pull -1", "Pull -2", "Pull -3"]
 PUSH_PULL_VALUES = [3, 2, 1, 0, -1, -2, -3]
-
-_NONE = "— None —"
 
 
 class MetadataSidebar(BaseSidebar):
@@ -54,11 +53,15 @@ class MetadataSidebar(BaseSidebar):
         # ── ORIGINAL ANALOG GEAR ─────────────────────────────────────────
         self.layout.addWidget(section_subheader("ORIGINAL ANALOG GEAR"))
 
+        gear_hint = QLabel("Type in any field to search the gear library.")
+        gear_hint.setStyleSheet(f"font-size: {THEME.font_size_xs}px; color: {THEME.text_muted};")
+        self.layout.addWidget(gear_hint)
+
         preset_row = QHBoxLayout()
         preset_row.setSpacing(4)
         self.layout.addWidget(field_label("Preset"))
-        self.preset_combo = QComboBox()
-        self.preset_combo.setToolTip("Reusable camera + lens + film combination")
+        self.preset_combo = SearchableGearCombo(placeholder="Search presets…")
+        self.preset_combo.setToolTip("Reusable camera + lens + film combination. Click and type to search.")
         preset_row.addWidget(self.preset_combo, 1)
         self.preset_clear_btn = QPushButton("Clear")
         self.preset_clear_btn.setToolTip("Clear gear preset selection")
@@ -66,18 +69,18 @@ class MetadataSidebar(BaseSidebar):
         self.layout.addLayout(preset_row)
 
         self.layout.addWidget(field_label("Camera"))
-        self.camera_combo = QComboBox()
-        self.camera_combo.setToolTip("Original film camera body")
+        self.camera_combo = SearchableGearCombo(placeholder="Search cameras…")
+        self.camera_combo.setToolTip("Original film camera body. Click and type to search.")
         self.layout.addWidget(self.camera_combo)
 
         self.layout.addWidget(field_label("Lens"))
-        self.lens_combo = QComboBox()
-        self.lens_combo.setToolTip("Original lens used on the film camera")
+        self.lens_combo = SearchableGearCombo(placeholder="Search lenses…")
+        self.lens_combo.setToolTip("Original lens used on the film camera. Click and type to search.")
         self.layout.addWidget(self.lens_combo)
 
         self.layout.addWidget(field_label("Film stock"))
-        self.film_stock_combo = QComboBox()
-        self.film_stock_combo.setToolTip("Film stock used for the original capture")
+        self.film_stock_combo = SearchableGearCombo(placeholder="Search film stocks…")
+        self.film_stock_combo.setToolTip("Film stock used for the original capture. Click and type to search.")
         self.layout.addWidget(self.film_stock_combo)
 
         self.manage_btn = QPushButton(" Manage…")
@@ -211,11 +214,11 @@ class MetadataSidebar(BaseSidebar):
         self._mark_dirty()
 
     def _connect_signals(self) -> None:
-        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+        self.preset_combo.selection_changed.connect(self._on_preset_changed)
         self.preset_clear_btn.clicked.connect(self._on_preset_clear)
-        self.camera_combo.currentIndexChanged.connect(self._on_gear_changed)
-        self.lens_combo.currentIndexChanged.connect(self._on_gear_changed)
-        self.film_stock_combo.currentIndexChanged.connect(self._on_gear_changed)
+        self.camera_combo.selection_changed.connect(self._on_gear_changed)
+        self.lens_combo.selection_changed.connect(self._on_gear_changed)
+        self.film_stock_combo.selection_changed.connect(self._on_gear_changed)
         self.manage_btn.clicked.connect(self._open_gear_library)
 
         self.format_combo.currentTextChanged.connect(self._on_format_changed)
@@ -231,33 +234,41 @@ class MetadataSidebar(BaseSidebar):
     def _refresh_gear_combos(self) -> None:
         conf = self.state.config.metadata
         self._gear_library = GearProfiles.load_library()
+        library = self._gear_library
 
-        def fill(combo: QComboBox, items, selected_id: str) -> None:
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(_NONE, "")
-            for item in items:
-                label = item.resolved_display_name if hasattr(item, "resolved_display_name") else item.display_name
-                combo.addItem(label, item.id)
-            idx = combo.findData(selected_id or "")
-            combo.setCurrentIndex(idx if idx >= 0 else 0)
-            combo.blockSignals(False)
+        if not self.preset_combo.is_editing():
+            self.preset_combo.blockSignals(True)
+            self.preset_combo.set_gear_items(
+                library.gear_presets,
+                conf.gear_preset_id or "",
+                lambda p: p.display_name or "Unnamed preset",
+                library,
+            )
+            self.preset_combo.blockSignals(False)
 
-        self.preset_combo.blockSignals(True)
-        self.preset_combo.clear()
-        self.preset_combo.addItem(_NONE, "")
-        for p in self._gear_library.gear_presets:
-            self.preset_combo.addItem(p.display_name or "Unnamed preset", p.id)
-        pidx = self.preset_combo.findData(conf.gear_preset_id or "")
-        self.preset_combo.setCurrentIndex(pidx if pidx >= 0 else 0)
-        self.preset_combo.blockSignals(False)
+        if not self.camera_combo.is_editing():
+            self.camera_combo.set_gear_items(
+                library.cameras,
+                conf.camera_id or "",
+                lambda c: c.resolved_display_name,
+            )
 
-        fill(self.camera_combo, self._gear_library.cameras, conf.camera_id)
-        fill(self.lens_combo, self._gear_library.lenses, conf.lens_id)
-        fill(self.film_stock_combo, self._gear_library.film_stocks, conf.film_stock_id)
+        if not self.lens_combo.is_editing():
+            self.lens_combo.set_gear_items(
+                library.lenses,
+                conf.lens_id or "",
+                lambda lens: lens.resolved_display_name,
+            )
+
+        if not self.film_stock_combo.is_editing():
+            self.film_stock_combo.set_gear_items(
+                library.film_stocks,
+                conf.film_stock_id or "",
+                lambda stock: stock.resolved_display_name,
+            )
 
     def _on_preset_changed(self, _idx: int) -> None:
-        preset_id = self.preset_combo.currentData() or ""
+        preset_id = self.preset_combo.selected_id()
         if not preset_id:
             return
         new_meta = metadata_from_gear(
@@ -288,17 +299,27 @@ class MetadataSidebar(BaseSidebar):
         self._apply_metadata_config(cleared)
 
     def _on_gear_changed(self, *_args) -> None:
+        sender = self.sender()
+        kwargs: dict = {}
+        if sender is self.camera_combo:
+            kwargs["gear_preset_id"] = ""
+            kwargs["camera_id"] = self.camera_combo.selected_id()
+        elif sender is self.lens_combo:
+            kwargs["gear_preset_id"] = ""
+            kwargs["lens_id"] = self.lens_combo.selected_id()
+        elif sender is self.film_stock_combo:
+            kwargs["gear_preset_id"] = ""
+            kwargs["film_stock_id"] = self.film_stock_combo.selected_id()
+        else:
+            return
+
         new_meta = metadata_from_gear(
             self.state.config.metadata,
             self._gear_library,
-            gear_preset_id="",
-            camera_id=self.camera_combo.currentData() or "",
-            lens_id=self.lens_combo.currentData() or "",
-            film_stock_id=self.film_stock_combo.currentData() or "",
+            **kwargs,
         )
-        new_meta = replace(new_meta, gear_preset_id="")
         self.preset_combo.blockSignals(True)
-        self.preset_combo.setCurrentIndex(0)
+        self.preset_combo.set_selected_id("")
         self.preset_combo.blockSignals(False)
         self._apply_metadata_config(new_meta, refresh_combos=False)
 
@@ -355,10 +376,10 @@ class MetadataSidebar(BaseSidebar):
             persist=True,
             render=False,
             readback_metrics=False,
-            gear_preset_id=self.preset_combo.currentData() or "",
-            camera_id=self.camera_combo.currentData() or "",
-            lens_id=self.lens_combo.currentData() or "",
-            film_stock_id=self.film_stock_combo.currentData() or "",
+            gear_preset_id=self.preset_combo.selected_id(),
+            camera_id=self.camera_combo.selected_id(),
+            lens_id=self.lens_combo.selected_id(),
+            film_stock_id=self.film_stock_combo.selected_id(),
             format=fmt,
             format_other=self.format_other_edit.text().strip() if fmt == "Other" else "",
             developer=self.developer_edit.text().strip(),

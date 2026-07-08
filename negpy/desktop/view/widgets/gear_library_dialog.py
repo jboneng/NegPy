@@ -23,6 +23,8 @@ from PyQt6.QtWidgets import (
 
 from negpy.desktop.view.styles.templates import field_label
 from negpy.desktop.view.styles.theme import THEME
+from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
+from negpy.features.metadata.gear_logic import matches_gear_filter
 from negpy.features.metadata.gear_models import (
     Camera,
     FilmColorType,
@@ -48,6 +50,13 @@ _CATEGORY_FIELDS: dict[str, frozenset[str]] = {
     "gear_presets": frozenset({"display_name", "preset_camera", "preset_lens", "preset_film", "notes"}),
 }
 
+_CATEGORY_SEARCH_PLACEHOLDER = {
+    "cameras": "Search cameras…",
+    "lenses": "Search lenses…",
+    "film_stocks": "Search film stocks…",
+    "gear_presets": "Search presets…",
+}
+
 
 class GearLibraryDialog(QDialog):
     library_changed = pyqtSignal()
@@ -57,6 +66,7 @@ class GearLibraryDialog(QDialog):
         self._library = library or GearProfiles.load_library()
         self._category = "cameras"
         self._selected_idx = -1
+        self._list_items: list = []
         self._updating = False
 
         self.setWindowTitle("Gear Library")
@@ -101,6 +111,11 @@ class GearLibraryDialog(QDialog):
         self.items_label = QLabel("ITEMS")
         self.items_label.setStyleSheet(f"color: {THEME.text_muted}; font-size: 10px; font-weight: bold;")
         mid_layout.addWidget(self.items_label)
+
+        self.item_search = QLineEdit()
+        self.item_search.setPlaceholderText("Search cameras…")
+        self.item_search.textChanged.connect(self._on_item_search_changed)
+        mid_layout.addWidget(self.item_search)
 
         self.item_list = QListWidget()
         self.item_list.currentRowChanged.connect(self._on_item_changed)
@@ -152,9 +167,9 @@ class GearLibraryDialog(QDialog):
         self.color_combo = QComboBox()
         self.color_combo.addItems([e.value for e in FilmColorType])
         self.notes_edit = QLineEdit()
-        self.preset_camera_combo = QComboBox()
-        self.preset_lens_combo = QComboBox()
-        self.preset_film_combo = QComboBox()
+        self.preset_camera_combo = SearchableGearCombo(placeholder="Search cameras…")
+        self.preset_lens_combo = SearchableGearCombo(placeholder="Search lenses…")
+        self.preset_film_combo = SearchableGearCombo(placeholder="Search film stocks…")
 
         for w in (
             self.display_name_edit,
@@ -171,9 +186,9 @@ class GearLibraryDialog(QDialog):
         self.iso_spin.valueChanged.connect(self._on_form_changed)
         self.format_combo.currentIndexChanged.connect(self._on_form_changed)
         self.color_combo.currentIndexChanged.connect(self._on_form_changed)
-        self.preset_camera_combo.currentIndexChanged.connect(self._on_form_changed)
-        self.preset_lens_combo.currentIndexChanged.connect(self._on_form_changed)
-        self.preset_film_combo.currentIndexChanged.connect(self._on_form_changed)
+        self.preset_camera_combo.selection_changed.connect(self._on_form_changed)
+        self.preset_lens_combo.selection_changed.connect(self._on_form_changed)
+        self.preset_film_combo.selection_changed.connect(self._on_form_changed)
 
         self.form_panel = QWidget()
         self.form_layout = QFormLayout(self.form_panel)
@@ -259,42 +274,81 @@ class GearLibraryDialog(QDialog):
         if row < 0:
             return
         self._category = _CATEGORIES[row][0]
+        self.item_search.blockSignals(True)
+        self.item_search.clear()
+        self.item_search.setPlaceholderText(_CATEGORY_SEARCH_PLACEHOLDER.get(self._category, "Search…"))
+        self.item_search.blockSignals(False)
         self._rebuild_item_list()
         self._show_form_for_category(self._category)
 
-    def _rebuild_item_list(self) -> None:
+    def _on_item_search_changed(self, _text: str) -> None:
+        self._rebuild_item_list()
+
+    def _rebuild_item_list(self, *, select_id: str | None = None) -> None:
+        all_items = self._current_items()
+        selected_id = select_id
+        if selected_id is None and 0 <= self._selected_idx < len(all_items):
+            selected_id = all_items[self._selected_idx].id
+
+        query = self.item_search.text().strip()
+        lib = self._library if self._category == "gear_presets" else None
+        visible = [item for item in all_items if matches_gear_filter(item, query, lib)]
+
+        self._list_items = visible
         self.item_list.blockSignals(True)
         self.item_list.clear()
-        for item in self._current_items():
+        for item in visible:
             self.item_list.addItem(QListWidgetItem(self._item_label(item)))
+
+        row = -1
+        if visible:
+            if selected_id:
+                row = next((i for i, item in enumerate(visible) if item.id == selected_id), -1)
+            if row < 0 and select_id is not None:
+                row = next((i for i, item in enumerate(visible) if item.id == select_id), 0)
+            elif row < 0 and not query:
+                row = 0
+        self.item_list.setCurrentRow(row)
         self.item_list.blockSignals(False)
-        if self._current_items():
-            self.item_list.setCurrentRow(0)
-        else:
+
+        if not visible and not query:
             self._selected_idx = -1
             self._clear_form()
+        elif row >= 0:
+            self._on_item_changed(row)
 
-    def _refresh_preset_combos(self) -> None:
-        for combo, items, none_label in (
-            (self.preset_camera_combo, self._library.cameras, "— None —"),
-            (self.preset_lens_combo, self._library.lenses, "— None —"),
-            (self.preset_film_combo, self._library.film_stocks, "— None —"),
-        ):
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem(none_label, "")
-            for item in items:
-                combo.addItem(self._item_label(item), item.id)
-            combo.blockSignals(False)
+    def _refresh_preset_combos(
+        self,
+        *,
+        camera_id: str = "",
+        lens_id: str = "",
+        film_id: str = "",
+    ) -> None:
+        self.preset_camera_combo.set_gear_items(
+            self._library.cameras,
+            camera_id,
+            lambda camera: camera.resolved_display_name,
+        )
+        self.preset_lens_combo.set_gear_items(
+            self._library.lenses,
+            lens_id,
+            lambda lens: lens.resolved_display_name,
+        )
+        self.preset_film_combo.set_gear_items(
+            self._library.film_stocks,
+            film_id,
+            lambda stock: stock.resolved_display_name,
+        )
 
     def _on_item_changed(self, row: int) -> None:
-        if row < 0 or row >= len(self._current_items()):
+        if row < 0 or row >= len(self._list_items):
             self._selected_idx = -1
             self._set_form_editable(True)
             self._clear_form()
             return
-        self._selected_idx = row
-        item = self._current_items()[row]
+        item = self._list_items[row]
+        all_items = self._current_items()
+        self._selected_idx = next(i for i, candidate in enumerate(all_items) if candidate.id == item.id)
         self._set_form_editable(not item.is_bundled)
         self._populate_form(item)
 
@@ -331,18 +385,15 @@ class GearLibraryDialog(QDialog):
                     self.color_combo.setCurrentIndex(idx)
                 self.notes_edit.setText(item.notes)
             elif isinstance(item, GearPreset):
-                self._refresh_preset_combos()
+                self._refresh_preset_combos(
+                    camera_id=item.camera_id,
+                    lens_id=item.lens_id,
+                    film_id=item.film_stock_id,
+                )
                 self.display_name_edit.setText(item.display_name)
-                self._set_combo_by_id(self.preset_camera_combo, item.camera_id)
-                self._set_combo_by_id(self.preset_lens_combo, item.lens_id)
-                self._set_combo_by_id(self.preset_film_combo, item.film_stock_id)
                 self.notes_edit.setText(item.notes)
         finally:
             self._updating = False
-
-    def _set_combo_by_id(self, combo: QComboBox, item_id: str) -> None:
-        idx = combo.findData(item_id or "")
-        combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _clear_form(self) -> None:
         self._updating = True
@@ -391,14 +442,16 @@ class GearLibraryDialog(QDialog):
             item.notes = self.notes_edit.text().strip()
         elif isinstance(item, GearPreset):
             item.display_name = self.display_name_edit.text().strip()
-            item.camera_id = self.preset_camera_combo.currentData() or ""
-            item.lens_id = self.preset_lens_combo.currentData() or ""
-            item.film_stock_id = self.preset_film_combo.currentData() or ""
+            item.camera_id = self.preset_camera_combo.selected_id()
+            item.lens_id = self.preset_lens_combo.selected_id()
+            item.film_stock_id = self.preset_film_combo.selected_id()
             item.notes = self.notes_edit.text().strip()
 
         items[self._selected_idx] = item
         self._set_current_items(items)
-        self.item_list.item(self._selected_idx).setText(self._item_label(item))
+        list_row = next((i for i, visible in enumerate(self._list_items) if visible.id == item.id), -1)
+        if list_row >= 0:
+            self.item_list.item(list_row).setText(self._item_label(item))
         GearProfiles.save_library(self._library)
         self.library_changed.emit()
 
@@ -415,8 +468,7 @@ class GearLibraryDialog(QDialog):
         items.append(item)
         self._set_current_items(items)
         GearProfiles.save_library(self._library)
-        self._rebuild_item_list()
-        self.item_list.setCurrentRow(len(items) - 1)
+        self._rebuild_item_list(select_id=item.id)
         self.library_changed.emit()
 
     def _duplicate_item(self) -> None:
@@ -433,8 +485,7 @@ class GearLibraryDialog(QDialog):
         items.append(dup)
         self._set_current_items(items)
         GearProfiles.save_library(self._library)
-        self._rebuild_item_list()
-        self.item_list.setCurrentRow(len(items) - 1)
+        self._rebuild_item_list(select_id=dup.id)
         self.library_changed.emit()
 
     def _delete_item(self) -> None:

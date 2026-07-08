@@ -214,10 +214,10 @@ Archival metadata for the **original analog capture** — gear, process, and sca
 
 ### Original analog gear
 
-Pick gear from your library (or a saved preset). Use **Manage…** to edit cameras, lenses, film stocks, and gear presets. Starter data is seeded into `~/NegPy/gear/` on first launch.
+Pick gear from your library (or a saved preset). Use **Manage…** to edit cameras, lenses, film stocks, and gear presets — the item list and preset link combos support the same type-to-search filtering. Starter data is seeded into `~/NegPy/gear/` on first launch.
 
 *   **Preset**: One-click camera + lens + film combination.
-*   **Camera / Lens / Film stock**: Dropdowns from the gear library. Changing any item clears the preset selection.
+*   **Camera / Lens / Film stock**: Searchable dropdowns — empty fields show a search hint; type to filter the list. An empty field means "not set", so clear the text to remove a selection. Changing any item clears the preset selection.
 *   **Clear**: Clears gear preset and library selections for this frame.
 
 Structured fields for the **original capture** (camera, lens, film ISO) are written to **standard EXIF** when you set gear in the Metadata tab — so Lightroom and other DAMs show your film camera and lens. Scan-only tags from the source file (`FocalLengthIn35mmFormat`, scan exposure/ISO, etc.) are stripped so they do not mix with capture data. The **digitization rig** (DSLR, film scanner, copy-stand setup) is preserved in `negpy:Scan*` XMP tags only.

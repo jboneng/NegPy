@@ -11,7 +11,7 @@ import pytest
 
 from negpy.features.metadata.gear_models import Camera, FilmStock, GearLibrary, GearPreset, Lens
 
-from negpy.features.metadata.gear_logic import metadata_from_gear
+from negpy.features.metadata.gear_logic import metadata_from_gear, matches_gear_filter, gear_search_text
 
 from negpy.features.metadata.models import MetadataConfig
 
@@ -121,6 +121,166 @@ def test_load_and_save_library(gear_dir):
     assert loaded.cameras[0].make == "Canon"
 
     assert loaded.gear_presets[0].display_name == "Test"
+
+
+def test_matches_gear_filter_substring_case_insensitive():
+    camera = Camera(id="c1", make="Nikon", model="FM2")
+    lens = Lens(id="l1", lens_model="Nikkor 28mm f/2.8 AI-S", make="Nikkor", focal_length_mm=28)
+    film = FilmStock(id="f1", manufacturer="Kodak", stock_name="Portra 400", iso=400)
+    library = GearLibrary(
+        cameras=[camera],
+        lenses=[lens],
+        film_stocks=[film],
+        gear_presets=[GearPreset(id="p1", display_name="Street combo", camera_id="c1", lens_id="l1", film_stock_id="f1")],
+    )
+
+    assert matches_gear_filter(camera, "fm2")
+    assert matches_gear_filter(lens, "28")
+    assert matches_gear_filter(film, "portra")
+    assert matches_gear_filter(library.gear_presets[0], "street", library)
+    assert matches_gear_filter(library.gear_presets[0], "nikkor", library)
+    assert not matches_gear_filter(camera, "canon")
+    assert matches_gear_filter(camera, "")
+
+
+def test_gear_search_text_includes_preset_linked_labels():
+    library = GearLibrary(
+        cameras=[Camera(id="c1", make="Nikon", model="FM2")],
+        lenses=[Lens(id="l1", lens_model="Nikkor 50mm f/1.8 AI-S", make="Nikkor")],
+        film_stocks=[FilmStock(id="f1", manufacturer="Kodak", stock_name="Tri-X 400", iso=400)],
+        gear_presets=[GearPreset(id="p1", display_name="Daily carry", camera_id="c1", lens_id="l1", film_stock_id="f1")],
+    )
+    preset = library.gear_presets[0]
+
+    search_text = gear_search_text(preset, library)
+
+    assert "fm2" in search_text
+    assert "nikkor" in search_text
+    assert "tri-x" in search_text
+
+
+def test_searchable_gear_combo_empty_selection_shows_placeholder():
+    from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
+
+    combo = SearchableGearCombo(placeholder="Search cameras…")
+    library = GearLibrary(cameras=[Camera(id="c1", make="Nikon", model="FM2")])
+    combo.set_gear_items(library.cameras, "", lambda camera: camera.resolved_display_name)
+
+    assert combo.selected_id() == ""
+    assert combo.line_edit().text() == ""
+
+    combo.set_gear_items(library.cameras, "c1", lambda camera: camera.resolved_display_name)
+    assert combo.line_edit().text() == "Nikon FM2"
+    assert combo.selected_id() == "c1"
+
+    combo.set_selected_id("")
+    assert combo.line_edit().text() == ""
+    assert combo.selected_id() == ""
+
+
+def test_searchable_gear_combo_reverts_partial_search_on_blur():
+    from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
+
+    combo = SearchableGearCombo(placeholder="Search cameras…")
+    library = GearLibrary(cameras=[Camera(id="c1", make="Nikon", model="FM2")])
+    combo.set_gear_items(library.cameras, "c1", lambda camera: camera.resolved_display_name)
+
+    combo.line_edit().setText("nik")
+    combo._on_text_edited("nik")
+    combo._finalize()
+
+    assert combo.line_edit().text() == "Nikon FM2"
+    assert combo.selected_id() == "c1"
+
+
+def test_searchable_gear_combo_clearing_field_clears_selection():
+    from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
+
+    combo = SearchableGearCombo(placeholder="Search cameras…")
+    library = GearLibrary(cameras=[Camera(id="c1", make="Nikon", model="FM2")])
+    combo.set_gear_items(library.cameras, "c1", lambda camera: camera.resolved_display_name)
+
+    combo.line_edit().clear()
+    combo._on_text_edited("")
+    # Selection stays committed until the user finalizes (blur / Enter)…
+    assert combo.selected_id() == "c1"
+    assert combo.line_edit().text() == ""
+
+    combo._finalize()
+    assert combo.selected_id() == ""
+    assert combo.line_edit().text() == ""
+
+
+def test_searchable_gear_combo_replace_selection_after_search():
+    from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
+
+    events: list[str] = []
+    combo = SearchableGearCombo(placeholder="Search cameras…")
+    combo.selection_changed.connect(events.append)
+    library = GearLibrary(
+        cameras=[
+            Camera(id="leica", make="Leica", model="M6"),
+            Camera(id="nikon", make="Nikon", model="FM2"),
+        ]
+    )
+    combo.set_gear_items(library.cameras, "leica", lambda camera: camera.resolved_display_name)
+
+    # Typing to search does NOT mutate the committed selection or emit.
+    combo.line_edit().setText("Leica M")
+    combo._on_text_edited("Leica M")
+    combo.line_edit().setText("nik")
+    combo._on_text_edited("nik")
+    assert combo.selected_id() == "leica"
+    assert events == []
+
+    # Picking Nikon commits exactly once, and it sticks.
+    combo._commit_id("nikon")
+    assert combo.selected_id() == "nikon"
+    assert combo.line_edit().text() == "Nikon FM2"
+    assert events == ["nikon"]
+
+    combo._finalize()
+    assert combo.selected_id() == "nikon"
+    assert combo.line_edit().text() == "Nikon FM2"
+    assert events == ["nikon"]
+
+
+def test_gear_library_dialog_item_search_hides_non_matching_selection():
+    from negpy.desktop.view.widgets.gear_library_dialog import GearLibraryDialog
+
+    library = GearLibrary(
+        lenses=[
+            Lens(id="l-canon", lens_model="FD 50mm f/1.4", make="Canon"),
+            Lens(id="l-nikon", lens_model="Nikkor 50mm f/1.8 AI-S", make="Nikkor"),
+        ]
+    )
+    dlg = GearLibraryDialog(library)
+    dlg._select_category("lenses")
+    dlg.item_list.setCurrentRow(0)  # Canon selected
+
+    dlg.item_search.setText("nik")
+    dlg._rebuild_item_list()
+
+    labels = [dlg.item_list.item(i).text() for i in range(dlg.item_list.count())]
+    assert labels == ["Nikkor 50mm f/1.8 AI-S"]
+    assert dlg.item_list.currentRow() == -1
+    assert dlg.lens_model_edit.text() == "FD 50mm f/1.4"
+
+
+def test_metadata_from_gear_clearing_camera_id():
+    library = GearLibrary(
+        cameras=[Camera(id="c1", make="Leica", model="M6")],
+        lenses=[],
+        film_stocks=[],
+        gear_presets=[],
+    )
+    base = MetadataConfig(camera_id="c1", camera_make="Leica", camera_model="M6")
+
+    cleared = metadata_from_gear(base, library, camera_id="")
+
+    assert cleared.camera_id == ""
+    assert cleared.camera_make == ""
+    assert cleared.camera_model == ""
 
 
 def test_metadata_from_gear_preset():
