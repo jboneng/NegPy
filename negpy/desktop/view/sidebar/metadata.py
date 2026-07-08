@@ -231,12 +231,15 @@ class MetadataSidebar(BaseSidebar):
 
         self.controller.session.file_selected.connect(self._on_file_selected)
 
-    def _refresh_gear_combos(self) -> None:
+    def _refresh_gear_combos(self, *, force: bool = False) -> None:
         conf = self.state.config.metadata
         self._gear_library = GearProfiles.load_library()
         library = self._gear_library
 
-        if not self.preset_combo.is_editing():
+        def should_refresh(combo: SearchableGearCombo) -> bool:
+            return force or not combo.is_editing()
+
+        if should_refresh(self.preset_combo):
             self.preset_combo.blockSignals(True)
             self.preset_combo.set_gear_items(
                 library.gear_presets,
@@ -246,31 +249,32 @@ class MetadataSidebar(BaseSidebar):
             )
             self.preset_combo.blockSignals(False)
 
-        if not self.camera_combo.is_editing():
+        if should_refresh(self.camera_combo):
             self.camera_combo.set_gear_items(
                 library.cameras,
                 conf.camera_id or "",
                 lambda c: c.resolved_display_name,
             )
 
-        if not self.lens_combo.is_editing():
+        if should_refresh(self.lens_combo):
             self.lens_combo.set_gear_items(
                 library.lenses,
                 conf.lens_id or "",
                 lambda lens: lens.resolved_display_name,
             )
 
-        if not self.film_stock_combo.is_editing():
+        if should_refresh(self.film_stock_combo):
             self.film_stock_combo.set_gear_items(
                 library.film_stocks,
                 conf.film_stock_id or "",
                 lambda stock: stock.resolved_display_name,
             )
 
-    def _on_preset_changed(self, _idx: int) -> None:
+    def _on_preset_changed(self, _preset_id: str = "") -> None:
         preset_id = self.preset_combo.selected_id()
         if not preset_id:
             return
+        self._dirty = False
         new_meta = metadata_from_gear(
             self.state.config.metadata,
             self._gear_library,
@@ -332,7 +336,7 @@ class MetadataSidebar(BaseSidebar):
             **asdict(new_meta),
         )
         if refresh_combos:
-            self._refresh_gear_combos()
+            self._refresh_gear_combos(force=True)
         self.sync_ui()
         self._schedule_preview()
 

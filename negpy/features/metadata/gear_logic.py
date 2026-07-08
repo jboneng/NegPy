@@ -84,9 +84,10 @@ def metadata_from_gear(
     if preset_id:
         preset = library.get_gear_preset(preset_id)
         if preset:
-            cam_id = preset.camera_id or cam_id
-            lens_id_val = preset.lens_id or lens_id_val
-            film_id = preset.film_stock_id or film_id
+            # Preset is authoritative: empty preset slots clear manual picks.
+            cam_id = preset.camera_id
+            lens_id_val = preset.lens_id
+            film_id = preset.film_stock_id
 
     camera_make = ""
     camera_model = ""
