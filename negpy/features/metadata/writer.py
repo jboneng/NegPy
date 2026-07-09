@@ -191,6 +191,9 @@ def _prepare_jpeg_exif(exif_dict: dict) -> dict:
     return prepared
 
 
+_APP1_EXIF_LIMIT = 65533
+
+
 def _resolve_payload(
     config: MetadataConfig,
     gear: Optional[GearLibrary],
@@ -199,6 +202,123 @@ def _resolve_payload(
     if gear is None:
         gear = GearProfiles.load_library()
     return build_metadata_payload(config, gear, source_exif)
+
+
+def _read_xmp_from_source(source_path: str) -> Optional[bytes]:
+    """Read embedded XMP from a source JPEG or TIFF/DNG file."""
+    try:
+        with open(source_path, "rb") as fh:
+            head = fh.read(12)
+        if head[:2] == b"\xff\xd8":
+            with open(source_path, "rb") as fh:
+                data = fh.read()
+            return _extract_jpeg_xmp(data)
+        with tifffile.TiffFile(source_path) as tf:
+            tag = tf.pages[0].tags.get(_TIFF_XMP_TAG)
+            if tag is None:
+                return None
+            value = tag.value
+            if isinstance(value, bytes):
+                return value
+            if isinstance(value, str):
+                return value.encode("utf-8")
+    except Exception:
+        pass
+    return None
+
+
+def _extract_jpeg_xmp(data: bytes) -> Optional[bytes]:
+    i = 2
+    n = len(data)
+    while i < n:
+        if data[i] != 0xFF:
+            break
+        marker = data[i + 1]
+        if marker == 0xD9:
+            break
+        if marker in range(0xD0, 0xD8):
+            i += 2
+            continue
+        if i + 4 > n:
+            break
+        seg_len = struct.unpack(">H", data[i + 2 : i + 4])[0]
+        seg_end = i + 2 + seg_len
+        if marker == 0xE1 and seg_end <= n:
+            payload_start = i + 4
+            if data[payload_start : payload_start + len(_XMP_APP1_HEADER)] == _XMP_APP1_HEADER:
+                return data[payload_start + len(_XMP_APP1_HEADER) : seg_end]
+        i = seg_end
+    return None
+
+
+def _load_source_exif(source_path: str, source_exif: Optional[dict]) -> Optional[dict]:
+    if source_exif is not None:
+        return copy.deepcopy(source_exif)
+    from negpy.infrastructure.loaders.helpers import read_exif_from_file
+
+    return read_exif_from_file(source_path)
+
+
+def _dump_exif_preserve(exif_dict: dict) -> Optional[bytes]:
+    """Serialize source EXIF for embed without NegPy field injection."""
+    candidate = _prepare_jpeg_exif(exif_dict)
+
+    def _fits(strip_maker_note: bool = False) -> Optional[bytes]:
+        work = copy.deepcopy(candidate)
+        if strip_maker_note and isinstance(work.get("Exif"), dict):
+            work["Exif"].pop(piexif.ExifIFD.MakerNote, None)
+        try:
+            b = piexif.dump(work)
+        except Exception:
+            return None
+        return b if len(b) <= _APP1_EXIF_LIMIT else None
+
+    exif_bytes = _fits()
+    if exif_bytes is not None:
+        return exif_bytes
+    exif_bytes = _fits(strip_maker_note=True)
+    if exif_bytes is not None:
+        _log.warning("source EXIF too large for JPEG APP1; dropped MakerNote for passthrough")
+        return exif_bytes
+    _log.warning("source EXIF too large for JPEG APP1; metadata passthrough skipped")
+    return None
+
+
+def preserve_source_metadata(
+    image_bytes: bytes,
+    source_path: str,
+    source_exif: Optional[dict] = None,
+) -> bytes:
+    """
+    Copy EXIF/XMP from the source file onto exported image bytes without
+    adding or altering NegPy metadata fields.
+    """
+    exif_dict = _load_source_exif(source_path, source_exif)
+    if not exif_dict:
+        return image_bytes
+
+    xmp_bytes = _read_xmp_from_source(source_path)
+
+    try:
+        output = io.BytesIO()
+        if image_bytes[:2] == b"\xff\xd8":
+            exif_bytes = _dump_exif_preserve(exif_dict)
+            if exif_bytes is None:
+                return image_bytes
+            jpeg_buf = io.BytesIO()
+            piexif.insert(exif_bytes, image_bytes, jpeg_buf)
+            result = _inject_jpeg_xmp(jpeg_buf.getvalue(), xmp_bytes) if xmp_bytes else jpeg_buf.getvalue()
+            output.write(result)
+        elif image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            exif_bytes = piexif.dump(_sanitize_exif(exif_dict))
+            _rewrite_png_with_metadata(image_bytes, exif_bytes, output, xmp_bytes)
+        else:
+            exif_bytes = piexif.dump(_sanitize_exif(exif_dict))
+            _rewrite_tiff_preserve(image_bytes, exif_bytes, output, xmp_bytes, fold_user_comment=False)
+        return output.getvalue()
+    except Exception:
+        _log.warning("metadata passthrough failed", exc_info=True)
+        return image_bytes
 
 
 def embed_metadata(
@@ -253,9 +373,6 @@ def embed_metadata(
     except Exception:
         _log.warning("metadata embed failed", exc_info=True)
         return image_bytes
-
-
-_APP1_EXIF_LIMIT = 65533
 
 
 def _strip_jpeg_xmp_segments(data: bytes) -> bytes:
@@ -417,6 +534,67 @@ def _build_extratag(tag: int, ttype: int, value: object) -> tuple | None:
     return None
 
 
+def _tiff_metadata_from_exif_bytes(exif_bytes: bytes) -> tuple[dict | None, str | None]:
+    """Map reserved TIFF tags (managed by tifffile, not extratags) from source EXIF."""
+    exif_dict = piexif.load(exif_bytes)
+    zeroth = exif_dict.get("0th", {}) or {}
+    metadata: dict[str, str] = {}
+    software: str | None = None
+    for tag, key in (
+        (piexif.ImageIFD.Artist, "Artist"),
+        (piexif.ImageIFD.Copyright, "Copyright"),
+    ):
+        text = _decode_ascii(zeroth.get(tag))
+        if text:
+            metadata[key] = text
+    software = _decode_ascii(zeroth.get(piexif.ImageIFD.Software))
+    return (metadata or None), software
+
+
+def _rewrite_tiff_preserve(
+    image_bytes: bytes,
+    exif_bytes: bytes,
+    output: io.BytesIO,
+    xmp_bytes: Optional[bytes] = None,
+    *,
+    fold_user_comment: bool = True,
+) -> None:
+    if image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        _rewrite_png_with_metadata(image_bytes, exif_bytes, output, xmp_bytes)
+        return
+
+    with tifffile.TiffFile(io.BytesIO(image_bytes)) as tf:
+        page = tf.pages[0]
+        arr = page.asarray()
+        photometric = page.photometric.name.lower()
+        compression = page.compression.name.lower() if int(page.compression) != 1 else None
+        icc = page.iccprofile
+
+    description, extratags = _exif_bytes_to_extratags(exif_bytes)
+    if fold_user_comment:
+        description = _fold_user_comment_into_description(description, extratags)
+
+    if xmp_bytes:
+        extratags.append((_TIFF_XMP_TAG, 7, len(xmp_bytes), xmp_bytes, True))
+
+    metadata = None
+    software = None
+    if not fold_user_comment:
+        metadata, software = _tiff_metadata_from_exif_bytes(exif_bytes)
+
+    tifffile.imwrite(
+        output,
+        arr,
+        photometric=photometric,
+        compression=compression,
+        iccprofile=icc,
+        description=description or "",
+        metadata=metadata,
+        software=software,
+        extratags=extratags,
+    )
+
+
 def _rewrite_png_with_metadata(
     image_bytes: bytes,
     exif_bytes: bytes,
@@ -441,29 +619,7 @@ def _rewrite_tiff_with_metadata(
     output: io.BytesIO,
     xmp_bytes: Optional[bytes] = None,
 ) -> None:
-    with tifffile.TiffFile(io.BytesIO(image_bytes)) as tf:
-        page = tf.pages[0]
-        arr = page.asarray()
-        photometric = page.photometric.name.lower()
-        compression = page.compression.name.lower() if int(page.compression) != 1 else None
-        icc = page.iccprofile
-
-    description, extratags = _exif_bytes_to_extratags(exif_bytes)
-    description = _fold_user_comment_into_description(description, extratags)
-
-    if xmp_bytes:
-        extratags.append((_TIFF_XMP_TAG, 7, len(xmp_bytes), xmp_bytes, True))
-
-    tifffile.imwrite(
-        output,
-        arr,
-        photometric=photometric,
-        compression=compression,
-        iccprofile=icc,
-        description=description or "",
-        metadata=None,
-        extratags=extratags,
-    )
+    _rewrite_tiff_preserve(image_bytes, exif_bytes, output, xmp_bytes, fold_user_comment=True)
 
 
 def _fold_user_comment_into_description(description: str | None, extratags: list[tuple]) -> str | None:

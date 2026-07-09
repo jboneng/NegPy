@@ -7,7 +7,7 @@ import piexif
 import tifffile
 
 from negpy.features.metadata.models import MetadataConfig
-from negpy.features.metadata.writer import _sanitize_exif, embed_metadata
+from negpy.features.metadata.writer import _sanitize_exif, embed_metadata, preserve_source_metadata
 
 
 def _make_tiff_bytes() -> bytes:
@@ -185,3 +185,53 @@ class TestEmbedMetadata:
             desc = tf.pages[0].tags.get(piexif.ImageIFD.ImageDescription).value
         for fragment in ("Portra 400", "35mm", "HC-110", "Push +1"):
             assert fragment in desc, f"missing {fragment!r} in {desc!r}"
+
+
+class TestPreserveSourceMetadata:
+    def test_copies_source_exif_without_negpy_software(self) -> None:
+        image_bytes = _make_tiff_bytes()
+        source_exif = {
+            "0th": {
+                piexif.ImageIFD.Make: b"Nikon",
+                piexif.ImageIFD.Model: b"F6",
+                piexif.ImageIFD.Software: b"MV-1 Recorder",
+            },
+            "Exif": {piexif.ExifIFD.LensModel: b"Nikkor 50mm f/1.8"},
+            "GPS": {},
+            "Interop": {},
+            "1st": {},
+        }
+        config = MetadataConfig(film="Portra 400", developer="C-41")
+
+        embedded = embed_metadata(image_bytes, config, source_exif)
+        preserved = preserve_source_metadata(image_bytes, "/unused/source.dng", source_exif)
+
+        with tifffile.TiffFile(io.BytesIO(embedded)) as tf:
+            tags = tf.pages[0].tags
+            desc = tags.get(piexif.ImageIFD.ImageDescription).value
+            assert "Portra 400" in desc and "C-41" in desc
+
+        with tifffile.TiffFile(io.BytesIO(preserved)) as tf:
+            tags = tf.pages[0].tags
+            assert tags.get(piexif.ImageIFD.Make).value == "Nikon"
+            assert tags.get(piexif.ImageIFD.Model).value == "F6"
+            assert tags.get(piexif.ImageIFD.Software).value == "MV-1 Recorder"
+            assert tags.get(piexif.ExifIFD.LensModel).value == "Nikkor 50mm f/1.8"
+
+    def test_does_not_normalize_orientation(self) -> None:
+        from PIL import Image
+
+        jpeg = io.BytesIO()
+        Image.new("RGB", (16, 16), (128, 0, 0)).save(jpeg, "JPEG")
+        source_exif = {
+            "0th": {piexif.ImageIFD.Orientation: 6, piexif.ImageIFD.Make: b"Nikon"},
+            "Exif": {},
+            "GPS": {},
+            "Interop": {},
+            "1st": {},
+        }
+
+        out = preserve_source_metadata(jpeg.getvalue(), "/unused/source.dng", source_exif)
+        loaded = piexif.load(out)
+        assert loaded["0th"].get(piexif.ImageIFD.Orientation) == 6
+        assert loaded["0th"].get(piexif.ImageIFD.Make) == b"Nikon"

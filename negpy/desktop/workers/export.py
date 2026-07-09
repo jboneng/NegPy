@@ -6,7 +6,7 @@ import tempfile
 import threading
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 from negpy.domain.models import WorkspaceConfig, ExportConfig, ExportFormat, ExportPreset, ExportPresetOutputMode
-from negpy.features.metadata.writer import embed_metadata
+from negpy.features.metadata.writer import embed_metadata, preserve_source_metadata
 from negpy.features.metadata.models import MetadataConfig
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.services.rendering.image_processor import ImageProcessor
@@ -141,7 +141,14 @@ class ExportWorker(QObject):
                         ExportFormat.JXL,
                         ExportFormat.WEBP,
                     ):
-                        bits = embed_metadata(bits, task.metadata_config, task.source_exif)
+                        if task.metadata_config.protect_original_metadata:
+                            bits = preserve_source_metadata(
+                                bits,
+                                task.file_info["path"],
+                                task.source_exif,
+                            )
+                        else:
+                            bits = embed_metadata(bits, task.metadata_config, task.source_exif)
 
                     out_dir, filename, ext = resolve_export_naming(task)
                     os.makedirs(out_dir, exist_ok=True)
