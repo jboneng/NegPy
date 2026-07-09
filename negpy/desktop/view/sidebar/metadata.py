@@ -50,96 +50,114 @@ class MetadataSidebar(BaseSidebar):
         self._dirty = False
         self._exif_locked = {"exposure": True}
 
+        self.protect_check = QCheckBox("Protect original metadata")
+        self.protect_check.setChecked(conf.protect_original_metadata)
+        self.protect_check.setToolTip(
+            "When enabled, NegPy copies EXIF and XMP from the source file onto exports "
+            "without adding or changing metadata. Gear and process fields are ignored."
+        )
+        self.layout.addWidget(self.protect_check)
+
+        self._metadata_controls = QWidget()
+        controls = QVBoxLayout(self._metadata_controls)
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(10)
+        self._controls_layout = controls
+
         # ── ORIGINAL ANALOG GEAR ─────────────────────────────────────────
-        self.layout.addWidget(section_subheader("ORIGINAL ANALOG GEAR"))
+        controls.addWidget(section_subheader("ORIGINAL ANALOG GEAR"))
 
         gear_hint = QLabel("Type in any field to search the gear library.")
         gear_hint.setStyleSheet(f"font-size: {THEME.font_size_xs}px; color: {THEME.text_muted};")
-        self.layout.addWidget(gear_hint)
+        controls.addWidget(gear_hint)
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(4)
-        self.layout.addWidget(field_label("Preset"))
+        controls.addWidget(field_label("Preset"))
         self.preset_combo = SearchableGearCombo(placeholder="Search presets…")
         self.preset_combo.setToolTip("Reusable camera + lens + film combination. Click and type to search.")
         preset_row.addWidget(self.preset_combo, 1)
         self.preset_clear_btn = QPushButton("Clear")
         self.preset_clear_btn.setToolTip("Clear gear preset selection")
         preset_row.addWidget(self.preset_clear_btn)
-        self.layout.addLayout(preset_row)
+        controls.addLayout(preset_row)
 
-        self.layout.addWidget(field_label("Camera"))
+        controls.addWidget(field_label("Camera"))
         self.camera_combo = SearchableGearCombo(placeholder="Search cameras…")
         self.camera_combo.setToolTip("Original film camera body. Click and type to search.")
-        self.layout.addWidget(self.camera_combo)
+        controls.addWidget(self.camera_combo)
 
-        self.layout.addWidget(field_label("Lens"))
+        controls.addWidget(field_label("Lens"))
         self.lens_combo = SearchableGearCombo(placeholder="Search lenses…")
         self.lens_combo.setToolTip("Original lens used on the film camera. Click and type to search.")
-        self.layout.addWidget(self.lens_combo)
+        controls.addWidget(self.lens_combo)
 
-        self.layout.addWidget(field_label("Film stock"))
+        controls.addWidget(field_label("Film stock"))
         self.film_stock_combo = SearchableGearCombo(placeholder="Search film stocks…")
         self.film_stock_combo.setToolTip("Film stock used for the original capture. Click and type to search.")
-        self.layout.addWidget(self.film_stock_combo)
+        controls.addWidget(self.film_stock_combo)
 
         self.manage_btn = QPushButton(" Manage…")
         self.manage_btn.setIcon(qta.icon("fa5s.cog", color=THEME.text_primary))
         self.manage_btn.setToolTip("Edit cameras, lenses, film stocks, and gear presets")
-        self.layout.addWidget(self.manage_btn)
+        controls.addWidget(self.manage_btn)
 
         # ── PROCESS ──────────────────────────────────────────────────────
-        self.layout.addWidget(section_subheader("PROCESS"))
+        controls.addWidget(section_subheader("PROCESS"))
 
-        self.layout.addWidget(field_label("Format"))
+        controls.addWidget(field_label("Format"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMAT_OPTIONS)
         if conf.format in FORMAT_OPTIONS:
             self.format_combo.setCurrentText(conf.format)
-        self.layout.addWidget(self.format_combo)
+        controls.addWidget(self.format_combo)
 
         self.format_other_edit = QLineEdit()
         self.format_other_edit.setPlaceholderText("e.g. 6×7")
         self.format_other_edit.setText(conf.format_other)
         self.format_other_edit.setVisible(conf.format == "Other")
-        self.layout.addWidget(self.format_other_edit)
+        controls.addWidget(self.format_other_edit)
 
-        self.layout.addWidget(field_label("Developer"))
+        controls.addWidget(field_label("Developer"))
         self.developer_edit = QLineEdit()
         self.developer_edit.setPlaceholderText("e.g. D-76 1+1")
         self.developer_edit.setText(conf.developer)
-        self.layout.addWidget(self.developer_edit)
+        controls.addWidget(self.developer_edit)
 
-        self.layout.addWidget(field_label("Push / Pull"))
+        controls.addWidget(field_label("Push / Pull"))
         self.push_pull_combo = QComboBox()
         self.push_pull_combo.addItems(PUSH_PULL_OPTIONS)
         idx = PUSH_PULL_VALUES.index(conf.push_pull) if conf.push_pull in PUSH_PULL_VALUES else 3
         self.push_pull_combo.setCurrentIndex(idx)
-        self.layout.addWidget(self.push_pull_combo)
+        controls.addWidget(self.push_pull_combo)
 
         # ── SCANNING ─────────────────────────────────────────────────────
-        self.layout.addWidget(section_subheader("SCANNING"))
+        controls.addWidget(section_subheader("SCANNING"))
 
-        self.layout.addWidget(field_label("Scanning"))
+        controls.addWidget(field_label("Scanning"))
         self.scanning_edit = QLineEdit()
         self.scanning_edit.setPlaceholderText("e.g. DSLR copy-stand scan")
         self.scanning_edit.setText(conf.scanning)
-        self.layout.addWidget(self.scanning_edit)
+        controls.addWidget(self.scanning_edit)
 
         self.sync_check = QCheckBox("Sync custom metadata to all files in batch export")
         self.sync_check.setChecked(conf.sync_to_batch)
-        self.layout.addWidget(self.sync_check)
+        controls.addWidget(self.sync_check)
 
         # ── EXPOSURE ─────────────────────────────────────────────────────
-        self.layout.addWidget(section_subheader("EXPOSURE"))
+        controls.addWidget(section_subheader("EXPOSURE"))
 
         hint = QLabel("Optional original capture exposure — click 🔓 to edit")
         hint.setStyleSheet(f"font-size: {THEME.font_size_xs}px; color: {THEME.text_muted};")
-        self.layout.addWidget(hint)
+        controls.addWidget(hint)
 
         self.exposure_label = field_label("Exposure")
-        self.layout.addWidget(self.exposure_label)
+        controls.addWidget(self.exposure_label)
         self.exposure_edit = self._make_exif_field("exposure")
+
+        self._refresh_gear_combos()
+        controls.addStretch()
+        self.layout.addWidget(self._metadata_controls, 1)
 
         # ── METADATA PREVIEW ─────────────────────────────────────────────
         self.preview_content = QWidget()
@@ -165,8 +183,7 @@ class MetadataSidebar(BaseSidebar):
         self.preview_section.set_content(self.preview_content)
         self.layout.addWidget(self.preview_section)
 
-        self._refresh_gear_combos()
-        self.layout.addStretch()
+        self._set_metadata_controls_enabled(not conf.protect_original_metadata)
 
     def _make_exif_field(self, key: str) -> QLineEdit:
         row = QHBoxLayout()
@@ -185,9 +202,12 @@ class MetadataSidebar(BaseSidebar):
 
         row.addWidget(edit)
         row.addWidget(lock_btn)
-        self.layout.addLayout(row)
+        self._controls_layout.addLayout(row)
         setattr(self, f"_{key}_lock_btn", lock_btn)
         return edit
+
+    def _set_metadata_controls_enabled(self, enabled: bool) -> None:
+        self._metadata_controls.setEnabled(enabled)
 
     def _apply_lock_style(self, edit: QLineEdit, locked: bool) -> None:
         if locked:
@@ -214,6 +234,7 @@ class MetadataSidebar(BaseSidebar):
         self._mark_dirty()
 
     def _connect_signals(self) -> None:
+        self.protect_check.toggled.connect(self._on_protect_toggled)
         self.preset_combo.selection_changed.connect(self._on_preset_changed)
         self.preset_clear_btn.clicked.connect(self._on_preset_clear)
         self.camera_combo.selection_changed.connect(self._on_gear_changed)
@@ -230,6 +251,17 @@ class MetadataSidebar(BaseSidebar):
         self.exposure_edit.textChanged.connect(self._mark_dirty)
 
         self.controller.session.file_selected.connect(self._on_file_selected)
+
+    def _on_protect_toggled(self, checked: bool) -> None:
+        self._set_metadata_controls_enabled(not checked)
+        self.update_config_section(
+            "metadata",
+            persist=True,
+            render=False,
+            readback_metrics=False,
+            protect_original_metadata=checked,
+        )
+        self._schedule_preview()
 
     def _refresh_gear_combos(self, *, force: bool = False) -> None:
         conf = self.state.config.metadata
@@ -401,6 +433,8 @@ class MetadataSidebar(BaseSidebar):
 
         self.block_signals(True)
         try:
+            self.protect_check.setChecked(conf.protect_original_metadata)
+            self._set_metadata_controls_enabled(not conf.protect_original_metadata)
             self._refresh_gear_combos()
 
             if conf.format in FORMAT_OPTIONS:
@@ -463,6 +497,12 @@ class MetadataSidebar(BaseSidebar):
                 item.widget().deleteLater()
 
         conf = self.state.config.metadata
+        if conf.protect_original_metadata:
+            self.preview_empty.setText("Original metadata will be copied from the source file on export.")
+            self.preview_empty.setVisible(True)
+            self.preview_section.setEnabled(True)
+            return
+
         source_exif = None
         current_hash = self.state.current_file_hash
         if current_hash and current_hash in self.state.source_exif:
@@ -471,6 +511,7 @@ class MetadataSidebar(BaseSidebar):
         payload = build_metadata_payload(conf, self._gear_library, source_exif)
         sections = payload.to_preview_sections()
 
+        self.preview_empty.setText("Select gear or enter process metadata to see a preview.")
         self.preview_empty.setVisible(not sections)
         mono = f"font-family: Consolas, monospace; font-size: {THEME.font_size_xs}px;"
 

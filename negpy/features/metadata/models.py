@@ -45,4 +45,7 @@ class MetadataConfig:
     scanning: str = ""
     sync_to_batch: bool = False
 
+    # When True, export copies source EXIF/XMP unchanged — NegPy writes no metadata.
+    protect_original_metadata: bool = False
+
     exposure_override: str = ""  # free-text e.g. "1/125s f/2.8 ISO 400"; empty = use source EXIF
