@@ -482,6 +482,13 @@ class DesktopSessionManager(QObject):
             filtered = {k: v for k, v in sticky_export.items() if k in valid_keys}
             config = replace(config, export=ExportConfig(**filtered))
 
+        sticky_protect = self.repo.get_global_setting("last_protect_original_metadata")
+        if sticky_protect is not None:
+            config = replace(
+                config,
+                metadata=replace(config.metadata, protect_original_metadata=bool(sticky_protect)),
+            )
+
         # Flat-field reference and distortion k1 are rig-global: the active profile's
         # values always override the per-file ones. New files default to enabled when a
         # profile is active; saved files keep their toggle.
@@ -637,6 +644,7 @@ class DesktopSessionManager(QObject):
                 "last_toning_config": asdict(config.toning),
                 "last_retouch_config": asdict(config.retouch),
                 "last_dust_remove": config.retouch.dust_remove,
+                "last_protect_original_metadata": config.metadata.protect_original_metadata,
             }
         )
 

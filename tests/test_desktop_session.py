@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from negpy.desktop.session import AppState, AssetListModel, DesktopSessionManager
 from negpy.domain.models import WorkspaceConfig, GeometryConfig, RetouchConfig, ProcessConfig
+from negpy.features.metadata.models import MetadataConfig
 from negpy.infrastructure.storage.repository import StorageRepository
 from negpy.kernel.system.config import APP_CONFIG
 
@@ -62,6 +63,26 @@ class TestDesktopSessionSync(unittest.TestCase):
         self.assertIn("last_process_mode", saved)
         self.assertIn("last_export_config", saved)
         self.assertIn("last_dust_remove", saved)
+        self.assertIn("last_protect_original_metadata", saved)
+
+    def test_protect_original_metadata_carries_globally(self):
+        sticky = {
+            "last_export_config": {},
+            "last_protect_original_metadata": True,
+        }
+        self.mock_repo.get_global_setting.side_effect = lambda key, default=None: sticky.get(key, default)
+        config = self.session._apply_sticky_settings(WorkspaceConfig(), only_global=False)
+        self.assertTrue(config.metadata.protect_original_metadata)
+
+    def test_protect_original_metadata_applied_to_saved_files(self):
+        sticky = {
+            "last_export_config": {},
+            "last_protect_original_metadata": True,
+        }
+        self.mock_repo.get_global_setting.side_effect = lambda key, default=None: sticky.get(key, default)
+        base = WorkspaceConfig(metadata=replace(WorkspaceConfig().metadata, protect_original_metadata=False))
+        config = self.session._apply_sticky_settings(base, only_global=True)
+        self.assertTrue(config.metadata.protect_original_metadata)
 
     def test_processing_toggles_carry_to_new_files(self):
         # Globally remembered toggles must be applied to a fresh (sidecar-less) file.
