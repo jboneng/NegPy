@@ -4,7 +4,6 @@ from dataclasses import replace
 
 from negpy.desktop.session import AppState, AssetListModel, DesktopSessionManager
 from negpy.domain.models import WorkspaceConfig, GeometryConfig, RetouchConfig, ProcessConfig
-from negpy.features.metadata.models import MetadataConfig
 from negpy.infrastructure.storage.repository import StorageRepository
 from negpy.kernel.system.config import APP_CONFIG
 
