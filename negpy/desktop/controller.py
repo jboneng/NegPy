@@ -1,6 +1,6 @@
 import os
 import time
-from dataclasses import fields, replace
+from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -24,6 +24,12 @@ from negpy.desktop.workers.render import (
     ThumbnailWorker,
 )
 from negpy.desktop.workers.scan_worker import ScanRequest, ScanWorker
+from negpy.desktop.workers.capture_worker import (
+    CalibrationRequest,
+    CaptureRequest,
+    CaptureWorker,
+    LiveViewRequest,
+)
 from negpy.domain.models import (
     ExportFormat,
     ExportPreset,
@@ -61,6 +67,28 @@ from negpy.services.rendering.preview_manager import PreviewManager
 from negpy.services.view.coordinate_mapping import CoordinateMapping
 
 logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _PendingCaptureImport:
+    """Capture intent carried across asynchronous discovery and session hydration."""
+
+    process_mode: Optional[ProcessMode] = None
+    detect_mode: bool = False
+
+
+def _capture_import_key(path: str) -> str:
+    return os.path.normcase(os.path.abspath(path))
+
+
+@dataclass(frozen=True)
+class _DiscoveryRequest:
+    paths: tuple[str, ...]
+    auto_open: bool
+    restore_triplets: Optional[dict]
+    replace_existing: bool
+    reselect_path: Optional[str]
+    rgb_scan: bool
 
 
 def baseline_compare_config(config: WorkspaceConfig) -> WorkspaceConfig:
@@ -132,6 +160,27 @@ class AppController(QObject):
     scan_finished = pyqtSignal(str)
     scan_error = pyqtSignal(str)
     scan_started = pyqtSignal()
+    capture_light_requested = pyqtSignal(int, int, int, int, str)
+    capture_requested = pyqtSignal(CaptureRequest)
+    capture_light_set = pyqtSignal(int, int, int, int)
+    capture_progress = pyqtSignal(float)
+    capture_finished = pyqtSignal(list)
+    capture_cancelled = pyqtSignal()
+    capture_error = pyqtSignal(str)
+    capture_status = pyqtSignal(str)
+    live_view_requested = pyqtSignal(LiveViewRequest)
+    live_view_stop_requested = pyqtSignal()
+    live_view_focus_magnifier_requested = pyqtSignal(bool)
+    live_view_focus_magnifier_pos_requested = pyqtSignal(int, int)
+    live_view_camera_setting_requested = pyqtSignal(str, int)
+    capture_live_view_started = pyqtSignal(str)
+    calibration_requested = pyqtSignal(CalibrationRequest)
+    capture_calibration_progress = pyqtSignal(float, str)
+    capture_calibration_finished = pyqtSignal(object)
+    poll_connection_requested = pyqtSignal(str)  # light port (auto-poll)
+    connection_polled = pyqtSignal(dict)  # {usb_ok, usb_model, light_ok, light_detail}
+    poll_light_temp_requested = pyqtSignal(str)  # light port (temp-only poll, runs even mid-live-view)
+    light_temp_polled = pyqtSignal(object)  # Scanlight LED temperature °C, or None
 
     def __init__(self, session_manager: DesktopSessionManager):
         super().__init__()
@@ -145,6 +194,10 @@ class AppController(QObject):
         self._auto_open_after_discovery = False
         self._replace_after_discovery = False
         self._reselect_after_discovery: Optional[str] = None
+        self._pending_capture_imports: Dict[str, _PendingCaptureImport] = {}
+        self._pending_asset_discoveries: List[_DiscoveryRequest] = []
+        self._active_discovery_keys: frozenset[str] = frozenset()
+        self._pending_scanned_file: Optional[str] = None
         self._gpu_fallback_notified = False
         self._cleaned_up = False
         self._active_batch: Optional[str] = None
@@ -189,6 +242,16 @@ class AppController(QObject):
         self.scan_worker = ScanWorker()
         self.scan_worker.moveToThread(self.scan_thread)
         self.scan_thread.start()
+
+        self.capture_thread = QThread()
+        self.capture_worker = CaptureWorker()
+        self.capture_worker.moveToThread(self.capture_thread)
+        # Started lazily on first capture use (_ensure_capture_thread): a *running* QThread aborts
+        # if destroyed without quit(), and controller unit tests build AppController without ever
+        # scanning — leaving the thread unstarted keeps it invisible to their teardown loops (so
+        # upstream tests needn't know about it), and the app starts it the moment the Camera
+        # Scanning tab polls or the user acts.
+        self._capture_thread_started = False
 
         self.canvas: Any = None
         self._is_rendering = False
@@ -299,6 +362,27 @@ class AppController(QObject):
         self.scan_worker.finished.connect(self._on_scan_finished)
         self.scan_worker.error.connect(self.scan_error.emit)
         self.scan_requested.connect(self.scan_worker.run_scan)
+        self.capture_light_requested.connect(self.capture_worker.set_light)
+        self.capture_requested.connect(self.capture_worker.run_capture)
+        self.capture_worker.light_set.connect(self.capture_light_set.emit)
+        self.capture_worker.progress.connect(self.capture_progress.emit)
+        self.capture_worker.finished.connect(self._on_capture_finished)
+        self.capture_worker.cancelled.connect(self.capture_cancelled.emit)
+        self.capture_worker.error.connect(self.capture_error.emit)
+        self.capture_worker.status.connect(self.capture_status.emit)
+        self.live_view_requested.connect(self.capture_worker.start_live_view)
+        self.live_view_stop_requested.connect(self.capture_worker.stop_live_view)
+        self.live_view_focus_magnifier_requested.connect(self.capture_worker.set_focus_magnifier)
+        self.live_view_focus_magnifier_pos_requested.connect(self.capture_worker.set_focus_magnifier_pos)
+        self.live_view_camera_setting_requested.connect(self.capture_worker.set_camera_setting)
+        self.capture_worker.live_view_started.connect(self.capture_live_view_started.emit)
+        self.calibration_requested.connect(self.capture_worker.run_calibration)
+        self.capture_worker.calibration_progress.connect(self.capture_calibration_progress.emit)
+        self.capture_worker.calibration_finished.connect(self.capture_calibration_finished.emit)
+        self.poll_connection_requested.connect(self.capture_worker.poll_connection)
+        self.capture_worker.poll_status.connect(self.connection_polled.emit)
+        self.poll_light_temp_requested.connect(self.capture_worker.poll_light_temp)
+        self.capture_worker.light_temp_polled.connect(self.light_temp_polled.emit)
 
         self.session.active_file_changing.connect(lambda: self._update_thumbnail_from_state(force_readback=True))
         self.session.file_selected.connect(self.load_file)
@@ -380,31 +464,49 @@ class AppController(QObject):
     ) -> None:
         """
         Starts asynchronous discovery of supported assets.
-        Silently skips if a discovery task is already in progress.
+        Requests arriving while hashing is in progress are queued in order.
 
         `replace_existing` rebuilds the asset list from the results (instead of
         appending) and reselects `reselect_path` — used when re-running discovery
         over already-loaded files (e.g. an RGB-scan mode toggle).
         """
+        request = _DiscoveryRequest(
+            paths=tuple(paths),
+            auto_open=auto_open,
+            restore_triplets=restore_triplets,
+            replace_existing=replace_existing,
+            reselect_path=reselect_path,
+            rgb_scan=bool(self.session.repo.get_global_setting("rgbscan_mode", False)),
+        )
         if self._discovery_running:
+            self._pending_asset_discoveries.append(request)
             return
+
+        self._start_asset_discovery(request)
+
+    def _start_asset_discovery(self, request: _DiscoveryRequest) -> None:
+        """Start one request; callers ensure only one discovery is active."""
 
         from negpy.infrastructure.loaders.constants import SUPPORTED_RAW_EXTENSIONS
 
         self._discovery_running = True
-        self._auto_open_after_discovery = auto_open
-        self._replace_after_discovery = replace_existing
-        self._reselect_after_discovery = reselect_path
+        self._auto_open_after_discovery = request.auto_open
+        self._replace_after_discovery = request.replace_existing
+        self._reselect_after_discovery = request.reselect_path
+        self._active_discovery_keys = frozenset(_capture_import_key(path) for path in request.paths)
         self.set_status("SCANNING FOR ASSETS...")
         self._begin_batch("Hashing files", abortable=False)
-        rgb_scan = bool(self.session.repo.get_global_setting("rgbscan_mode", False))
         task = AssetDiscoveryTask(
-            paths=paths,
+            paths=list(request.paths),
             supported_extensions=tuple(SUPPORTED_RAW_EXTENSIONS),
-            rgb_scan=rgb_scan,
-            restore_triplets=restore_triplets,
+            rgb_scan=request.rgb_scan,
+            restore_triplets=request.restore_triplets,
         )
         self.asset_discovery_requested.emit(task)
+
+    def _start_next_asset_discovery(self) -> None:
+        if self._pending_asset_discoveries:
+            self._start_asset_discovery(self._pending_asset_discoveries.pop(0))
 
     def set_rgb_scan_mode(self, enabled: bool) -> None:
         """Persist the RGB-scan toggle and re-discover already-loaded assets so the
@@ -439,6 +541,8 @@ class AppController(QObject):
         reselect_path = self._reselect_after_discovery
         self._replace_after_discovery = False
         self._reselect_after_discovery = None
+        active_discovery_keys = self._active_discovery_keys
+        self._active_discovery_keys = frozenset()
         pending_scan = getattr(self, "_pending_scanned_file", None)
 
         if replace_existing and valid_assets:
@@ -456,20 +560,35 @@ class AppController(QObject):
                 0,
             )
             self.session.select_file(idx)
+            self._start_next_asset_discovery()
             return
 
+        selected_pending_scan = False
         if valid_assets:
             first_new_idx = len(self.session.state.uploaded_files)
             self.session.add_files([], validated_info=valid_assets)
             self.generate_missing_thumbnails()
-            if pending_scan:
-                self._select_file_by_path(pending_scan)
-                self._pending_scanned_file = None
+            if pending_scan and self._select_file_by_path(pending_scan):
+                selected_pending_scan = True
             elif auto_open and not self.state.current_file_path and len(self.session.state.uploaded_files) > first_new_idx:
                 self.session.select_file(first_new_idx)
         else:
             self.set_status("NO SUPPORTED ASSETS FOUND", 3000)
             self.status_progress_requested.emit(0, 0)
+
+        if pending_scan:
+            pending_key = _capture_import_key(pending_scan)
+            if selected_pending_scan:
+                # select_file emits load_file synchronously in the real session. Pop again
+                # as a fallback for alternate session implementations and tests.
+                self._pending_capture_imports.pop(pending_key, None)
+                self._pending_scanned_file = None
+            elif pending_key in active_discovery_keys:
+                # This request finished without the intended primary asset. Drop only its
+                # metadata; a later capture may already be waiting in the FIFO queue.
+                self._pending_capture_imports.pop(pending_key, None)
+                self._pending_scanned_file = None
+        self._start_next_asset_discovery()
 
     def _file_hash_for_path(self, file_path: str) -> Optional[str]:
         if self.state.current_file_path == file_path and self.state.current_file_hash:
@@ -499,6 +618,17 @@ class AppController(QObject):
         self.state.has_ir = False
         self.state.original_res = (0, 0)
 
+        pending_import = self._pending_capture_imports.pop(_capture_import_key(file_path), None)
+        if pending_import is not None and pending_import.process_mode is not None:
+            process = self.state.config.process
+            process = replace(
+                process,
+                process_mode=pending_import.process_mode,
+                **invalidate_local_bounds(process),
+            )
+            self.state.config = replace(self.state.config, process=process)
+            self.state.is_dirty = True
+
         rgbscan = self.state.config.rgbscan
         self.preview_load_requested.emit(
             PreviewLoadTask(
@@ -507,7 +637,11 @@ class AppController(QObject):
                 use_camera_wb=not self.state.config.process.linear_raw,
                 full_resolution=self.state.hq_preview,
                 file_hash=self._file_hash_for_path(file_path),
-                detect_mode=force_detect or (self.state.autodetect_enabled and self.state.current_file_is_new),
+                detect_mode=(
+                    pending_import.detect_mode
+                    if pending_import is not None
+                    else force_detect or (self.state.autodetect_enabled and self.state.current_file_is_new)
+                ),
                 green_path=rgbscan.green_path if rgbscan.enabled else "",
                 blue_path=rgbscan.blue_path if rgbscan.enabled else "",
                 align=rgbscan.align,
@@ -1254,12 +1388,94 @@ class AppController(QObject):
         self._pending_scanned_file = path
         self.request_asset_discovery([path])
 
-    def _select_file_by_path(self, path: str) -> None:
+    def _select_file_by_path(self, path: str) -> bool:
         """Find a file by path in uploaded_files and select it."""
         for i, f_info in enumerate(self.session.state.uploaded_files):
             if f_info.get("path") == path:
                 self.session.select_file(i)
-                return
+                return True
+        return False
+
+    # ── Scanlight capture integration ─────────────────────────────────
+
+    def _ensure_capture_thread(self) -> None:
+        """Start the capture worker's thread on first use (lazy). Every capture entry point that
+        emits to the worker calls this first, so the thread is running when the queued cross-thread
+        signal is delivered. The live-view sub-controls and cancel skip it: they only run once a
+        session is already up (started here) or touch the worker's thread-safe cancel Event."""
+        if not self._capture_thread_started:
+            self.capture_thread.start()
+            self._capture_thread_started = True
+
+    def set_scanlight_color(self, r: int, g: int, b: int, w: int = 0, port: str = "") -> None:
+        """Live light control (no capture): RGB for preview, or white (w) for focus."""
+        self._ensure_capture_thread()
+        self.capture_light_requested.emit(r, g, b, w, port)
+
+    def start_capture(self, req: CaptureRequest) -> None:
+        """Start a capture; the Scanlight sidebar tracks state via signals."""
+        self._ensure_capture_thread()
+        self._last_capture_req = req
+        self.capture_requested.emit(req)
+
+    def cancel_capture(self) -> None:
+        self.capture_worker.cancel()
+
+    def start_live_view(self, req: LiveViewRequest) -> None:
+        self._ensure_capture_thread()
+        self.live_view_requested.emit(req)
+
+    def stop_live_view(self) -> None:
+        self.live_view_stop_requested.emit()
+
+    def set_focus_magnifier(self, on: bool) -> None:
+        self.live_view_focus_magnifier_requested.emit(on)
+
+    def set_focus_magnifier_pos(self, x: int, y: int) -> None:
+        self.live_view_focus_magnifier_pos_requested.emit(x, y)
+
+    def set_camera_setting(self, which: str, raw: int) -> None:
+        self.live_view_camera_setting_requested.emit(which, raw)
+
+    def start_calibration(self, req: CalibrationRequest) -> None:
+        self._ensure_capture_thread()
+        self.calibration_requested.emit(req)
+
+    def poll_connection(self, port: str) -> None:
+        self._ensure_capture_thread()
+        self.poll_connection_requested.emit(port)
+
+    def poll_light_temp(self, port: str) -> None:
+        self._ensure_capture_thread()
+        self.poll_light_temp_requested.emit(port)
+
+    def _on_capture_finished(self, paths: list) -> None:
+        """Feed the captured frame(s) into NegPy. A 3-file RGB triplet → RGB-Scan negative
+        (C-41) pipeline; a single white-light slide → E-6/positive; a normal white-light
+        camera scan → an ordinary single RAW (RGB-Scan off, process left to NegPy)."""
+        self.capture_finished.emit(paths)
+        if not paths:
+            return
+        req = getattr(self, "_last_capture_req", None)
+        white = bool(req is not None and req.white_mode)
+        rgb = bool(req is not None and getattr(req, "rgb_mode", True))
+        # RGB-Scan (triplet merge) is on only for an actual RGB triplet — off for a single
+        # white-light slide OR a normal (non-Scanlight) camera scan.
+        self.session.repo.save_global_setting("rgbscan_mode", rgb and not white)
+        if white:  # slides/B&W force a positive process
+            mode = (req.white_process_mode or "auto").lower()
+            target = {"e-6": ProcessMode.E6, "b&w": ProcessMode.BW}.get(mode)
+            self._pending_capture_imports[_capture_import_key(paths[0])] = _PendingCaptureImport(
+                process_mode=target,
+                detect_mode=target is None,
+            )
+        elif rgb:
+            # Independently exposed RGB channels have no broadband orange-mask signal for
+            # the normal classifier. They are negative scans unless capture metadata says
+            # otherwise, so carry C-41 through discovery instead of guessing from the merge.
+            self._pending_capture_imports[_capture_import_key(paths[0])] = _PendingCaptureImport(process_mode=ProcessMode.C41)
+        self._pending_scanned_file = paths[0]
+        self.request_asset_discovery(list(paths))
 
     def effective_output_icc(self) -> Optional[str]:
         """Output profile the preview proofs through: a custom override, else the
@@ -2103,6 +2319,10 @@ class AppController(QObject):
         if self.scan_thread.isRunning():
             self.scan_thread.quit()
             self.scan_thread.wait()
+        self.capture_worker.shutdown()
+        if self.capture_thread.isRunning():
+            self.capture_thread.quit()
+            self.capture_thread.wait()
         self.render_worker.destroy_all()
 
         # All GPU-touching threads are now joined; release the wgpu device.
