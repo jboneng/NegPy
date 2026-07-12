@@ -5,7 +5,7 @@ are stored as the same binding as the number row (``9`` instead of ``Num+9``).
 We preserve the keypad modifier so both keys can be bound independently.
 """
 
-from PyQt6.QtCore import QEvent, QKeyCombination, Qt
+from PyQt6.QtCore import QKeyCombination, Qt
 from PyQt6.QtGui import QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import QKeySequenceEdit
 
