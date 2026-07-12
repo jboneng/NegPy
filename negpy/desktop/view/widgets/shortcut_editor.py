@@ -1,4 +1,4 @@
-from PyQt6.QtCore import QEvent, QModelIndex, QPoint, QSortFilterProxyModel, Qt, QTimer
+from PyQt6.QtCore import QEvent, QModelIndex, Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -18,8 +18,15 @@ from PyQt6.QtWidgets import (
 )
 
 from negpy.desktop.view.shortcut_editor_search import (
+    HIGHLIGHT_MS,
+    SEARCH_ROLE,
+    TARGET_ROLE,
     ShortcutEditorTarget,
+    ShortcutSearchProxy,
     build_shortcut_editor_targets,
+    first_matching_target_id,
+    scroll_row_to_center,
+    target_id_from_completer_index,
 )
 from negpy.desktop.view.shortcut_registry import (
     REGISTRY,
@@ -34,33 +41,6 @@ from negpy.desktop.view.shortcut_registry import (
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
 from negpy.desktop.view.widgets.key_sequence_edit import KeypadAwareKeySequenceEdit
 from negpy.desktop.view.styles.theme import THEME
-
-_TARGET_ROLE = Qt.ItemDataRole.UserRole
-_SEARCH_ROLE = Qt.ItemDataRole.UserRole + 1
-_HIGHLIGHT_MS = 1800
-
-
-class _ShortcutSearchProxy(QSortFilterProxyModel):
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self._query = ""
-
-    def set_query(self, query: str) -> None:
-        needle = (query or "").strip().casefold()
-        if needle == self._query:
-            return
-        self._query = needle
-        self.invalidateFilter()
-
-    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:  # noqa: N802
-        if not self._query:
-            return False
-        model = self.sourceModel()
-        if model is None:
-            return False
-        index = model.index(source_row, 0, source_parent)
-        search_text = model.data(index, _SEARCH_ROLE) or ""
-        return self._query in search_text
 
 
 def _format_default_pair(inc_key: str, dec_key: str) -> str:
@@ -171,7 +151,7 @@ class ShortcutEditorDialog(QDialog):
 
     def _init_search_completer(self) -> None:
         self._search_model = QStandardItemModel(self)
-        self._search_proxy = _ShortcutSearchProxy(self)
+        self._search_proxy = ShortcutSearchProxy(self)
         self._search_proxy.setSourceModel(self._search_model)
         self._reload_search_model()
 
@@ -188,29 +168,16 @@ class ShortcutEditorDialog(QDialog):
         self._targets = build_shortcut_editor_targets(bindings)
         for target in self._targets:
             item = QStandardItem(f"{target.label}  ·  {target.category}")
-            item.setData(target.target_id, _TARGET_ROLE)
-            item.setData(target.search_text, _SEARCH_ROLE)
+            item.setData(target.target_id, TARGET_ROLE)
+            item.setData(target.search_text, SEARCH_ROLE)
             item.setEditable(False)
             self._search_model.appendRow(item)
 
     def _target_id_from_completer_index(self, index: QModelIndex) -> str:
-        if not index.isValid():
-            return ""
-        completion_model = self._search_completer.completionModel()
-        proxy_index = completion_model.mapToSource(index)
-        source_index = self._search_proxy.mapToSource(proxy_index)
-        if not source_index.isValid():
-            return ""
-        target_id = self._search_model.data(source_index, _TARGET_ROLE)
-        return str(target_id) if target_id else ""
+        return target_id_from_completer_index(self._search_completer, self._search_model, self._search_proxy, index)
 
     def _first_matching_target_id(self) -> str:
-        completion_model = self._search_completer.completionModel()
-        for row in range(completion_model.rowCount()):
-            target_id = self._target_id_from_completer_index(completion_model.index(row, 0))
-            if target_id:
-                return target_id
-        return ""
+        return first_matching_target_id(self._search_completer, self._search_model, self._search_proxy)
 
     def _on_search_edited(self, text: str) -> None:
         self._search_proxy.set_query(text)
@@ -258,23 +225,12 @@ class ShortcutEditorDialog(QDialog):
                 section.expand()
 
         def _reveal() -> None:
-            self._scroll_row_to_center(row)
+            scroll_row_to_center(self._scroll, row)
             self._set_highlight(row)
             if focus_edit is not None:
                 focus_edit.setFocus()
 
         QTimer.singleShot(50, _reveal)
-
-    def _scroll_row_to_center(self, row: QWidget) -> None:
-        content = self._scroll.widget()
-        if content is None:
-            return
-        center = row.mapTo(content, QPoint(0, row.height() // 2))
-        bar = self._scroll.verticalScrollBar()
-        viewport_h = self._scroll.viewport().height()
-        value = center.y() - viewport_h // 2
-        value = max(bar.minimum(), min(bar.maximum(), value))
-        bar.setValue(value)
 
     def _set_highlight(self, row: QFrame) -> None:
         self._clear_highlight()
@@ -282,7 +238,7 @@ class ShortcutEditorDialog(QDialog):
         row.style().unpolish(row)
         row.style().polish(row)
         self._highlighted_row = row
-        self._highlight_timer.start(_HIGHLIGHT_MS)
+        self._highlight_timer.start(HIGHLIGHT_MS)
 
     def _clear_highlight(self) -> None:
         if self._highlighted_row is None:
