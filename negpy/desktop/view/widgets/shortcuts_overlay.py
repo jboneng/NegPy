@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -15,12 +14,16 @@ from PyQt6.QtWidgets import (
 )
 
 from negpy.desktop.view.shortcut_editor_search import (
+    BINDING_KEYS_ROLE,
     HIGHLIGHT_MS,
     SEARCH_ROLE,
     TARGET_ROLE,
+    TEXT_SEARCH_ROLE,
     ShortcutEditorTarget,
     ShortcutSearchProxy,
+    binding_keys_display,
     build_shortcut_editor_targets,
+    configure_search_completer,
     first_matching_target_id,
     scroll_row_to_center,
     target_id_from_completer_index,
@@ -35,6 +38,7 @@ from negpy.desktop.view.shortcut_registry import (
 )
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
+from negpy.desktop.view.widgets.shortcut_search_line_edit import ShortcutSearchLineEdit
 
 
 def _format_key_pair(inc_key: str, dec_key: str) -> str:
@@ -90,13 +94,14 @@ class ShortcutsOverlay(QDialog):
 
         intro = QLabel(
             "Current keyboard shortcuts and slider step sizes. "
-            "Search to jump to an action, or open Customize to change bindings."
+            "Search by name or press a shortcut to filter results, then choose or press Enter. "
+            "Open Customize to change bindings."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
 
-        self._search_edit = QLineEdit()
-        self._search_edit.setPlaceholderText("Search actions or key bindings…")
+        self._search_edit = ShortcutSearchLineEdit(self._known_bindings)
+        self._search_edit.setPlaceholderText("Search actions, press a shortcut, then choose or Enter…")
         self._search_edit.setClearButtonEnabled(True)
         self._search_edit.textEdited.connect(self._on_search_edited)
         self._search_edit.installEventFilter(self)
@@ -146,11 +151,13 @@ class ShortcutsOverlay(QDialog):
         self._reload_search_model()
 
         self._search_completer = QCompleter(self._search_proxy, self)
-        self._search_completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
-        self._search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        configure_search_completer(self._search_completer)
         self._search_completer.setWidget(self._search_edit)
         self._search_completer.activated[QModelIndex].connect(self._on_search_activated)
         self._search_completer.popup().setObjectName("shortcut_editor_search_popup")
+
+    def _known_bindings(self) -> frozenset[str]:
+        return frozenset(key for key in self._bindings.values() if key)
 
     def _reload_search_model(self) -> None:
         self._search_model.clear()
@@ -159,6 +166,8 @@ class ShortcutsOverlay(QDialog):
             item = QStandardItem(f"{target.label}  ·  {target.category}")
             item.setData(target.target_id, TARGET_ROLE)
             item.setData(target.search_text, SEARCH_ROLE)
+            item.setData(target.text_search, TEXT_SEARCH_ROLE)
+            item.setData(binding_keys_display(target.binding_keys), BINDING_KEYS_ROLE)
             item.setEditable(False)
             self._search_model.appendRow(item)
 
