@@ -1,12 +1,15 @@
-from PyQt6.QtGui import QKeySequence
+from PyQt6.QtCore import QEvent, QModelIndex, QPoint, QSortFilterProxyModel, Qt, QTimer
+from PyQt6.QtGui import QKeySequence, QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QCompleter,
     QDialog,
     QDoubleSpinBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -14,6 +17,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from negpy.desktop.view.shortcut_editor_search import (
+    ShortcutEditorTarget,
+    build_shortcut_editor_targets,
+)
 from negpy.desktop.view.shortcut_registry import (
     REGISTRY,
     EditorRowSingle,
@@ -26,6 +33,33 @@ from negpy.desktop.view.shortcut_registry import (
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
 from negpy.desktop.view.widgets.key_sequence_edit import KeypadAwareKeySequenceEdit
 from negpy.desktop.view.styles.theme import THEME
+
+_TARGET_ROLE = Qt.ItemDataRole.UserRole
+_SEARCH_ROLE = Qt.ItemDataRole.UserRole + 1
+_HIGHLIGHT_MS = 1800
+
+
+class _ShortcutSearchProxy(QSortFilterProxyModel):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._query = ""
+
+    def set_query(self, query: str) -> None:
+        needle = (query or "").strip().casefold()
+        if needle == self._query:
+            return
+        self._query = needle
+        self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:  # noqa: N802
+        if not self._query:
+            return False
+        model = self.sourceModel()
+        if model is None:
+            return False
+        index = model.index(source_row, 0, source_parent)
+        search_text = model.data(index, _SEARCH_ROLE) or ""
+        return self._query in search_text
 
 
 def _categories_in_order() -> list[tuple[str, list[tuple[str, ShortcutEntry]]]]:
@@ -53,6 +87,14 @@ class ShortcutEditorDialog(QDialog):
         self._session = session
         self._edits: dict[str, KeypadAwareKeySequenceEdit] = {}
         self._step_edits: dict[str, QDoubleSpinBox] = {}
+        self._sections: dict[str, CollapsibleSection] = {}
+        self._row_widgets: dict[str, QFrame] = {}
+        self._row_focus_edits: dict[str, KeypadAwareKeySequenceEdit] = {}
+        self._targets: list[ShortcutEditorTarget] = build_shortcut_editor_targets(self._initial_bindings)
+        self._highlighted_row: QFrame | None = None
+        self._highlight_timer = QTimer(self)
+        self._highlight_timer.setSingleShot(True)
+        self._highlight_timer.timeout.connect(self._clear_highlight)
         self.setWindowTitle("Customize Shortcuts")
         self.resize(820, 720)
         self._init_ui()
@@ -66,14 +108,26 @@ class ShortcutEditorDialog(QDialog):
             QDialog {{ background-color: {THEME.bg_panel}; }}
             QLabel {{ color: {THEME.text_primary}; font-size: 12px; }}
             QPushButton {{ padding: 6px 14px; }}
+            QFrame#shortcut_editor_row[highlighted="true"] {{
+                background-color: rgba(183, 28, 28, 0.12);
+                border-left: 2px solid {THEME.accent_primary};
+            }}
         """)
 
         intro = QLabel(
             "Set shortcuts and keyboard step sizes for slider actions. "
-            "Duplicate bindings are rejected. Reset All restores defaults."
+            "Search to jump to an action. Duplicate bindings are rejected. Reset All restores defaults."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
+
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("Search actions or key bindings…")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.textEdited.connect(self._on_search_edited)
+        self._search_edit.installEventFilter(self)
+        self._init_search_completer()
+        root.addWidget(self._search_edit)
 
         self._invert_zoom_chk = QCheckBox("Reverse scroll-to-zoom direction (scroll up zooms out)")
         self._invert_zoom_chk.setToolTip(
@@ -90,9 +144,9 @@ class ShortcutEditorDialog(QDialog):
         divider.setStyleSheet(f"color: {THEME.border_color};")
         root.addWidget(divider)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         container = QWidget()
         sections_layout = QVBoxLayout(container)
         sections_layout.setContentsMargins(0, 0, 0, 0)
@@ -100,12 +154,13 @@ class ShortcutEditorDialog(QDialog):
 
         for category, items in _categories_in_order():
             section = CollapsibleSection(category, expanded=False)
-            section.set_content(self._build_category_grid(items))
+            section.set_content(self._build_category_grid(category, items))
+            self._sections[category] = section
             sections_layout.addWidget(section)
 
         sections_layout.addStretch()
-        scroll.setWidget(container)
-        root.addWidget(scroll, stretch=1)
+        self._scroll.setWidget(container)
+        root.addWidget(self._scroll, stretch=1)
 
         buttons = QHBoxLayout()
         reset_btn = QPushButton("Reset All")
@@ -120,7 +175,135 @@ class ShortcutEditorDialog(QDialog):
         buttons.addWidget(save_btn)
         root.addLayout(buttons)
 
-    def _build_category_grid(self, items: list[tuple[str, ShortcutEntry]]) -> QWidget:
+        self._reload_search_model()
+        for edit in self._edits.values():
+            edit.keySequenceChanged.connect(self._reload_search_model)
+
+    def _init_search_completer(self) -> None:
+        self._search_model = QStandardItemModel(self)
+        self._search_proxy = _ShortcutSearchProxy(self)
+        self._search_proxy.setSourceModel(self._search_model)
+        self._reload_search_model()
+
+        self._search_completer = QCompleter(self._search_proxy, self)
+        self._search_completer.setCompletionMode(QCompleter.CompletionMode.UnfilteredPopupCompletion)
+        self._search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._search_completer.setWidget(self._search_edit)
+        self._search_completer.activated[QModelIndex].connect(self._on_search_activated)
+        self._search_completer.popup().setObjectName("shortcut_editor_search_popup")
+
+    def _reload_search_model(self) -> None:
+        self._search_model.clear()
+        bindings = {action_id: self._portable(edit) for action_id, edit in self._edits.items()} if self._edits else self._initial_bindings
+        self._targets = build_shortcut_editor_targets(bindings)
+        for target in self._targets:
+            item = QStandardItem(f"{target.label}  ·  {target.category}")
+            item.setData(target.target_id, _TARGET_ROLE)
+            item.setData(target.search_text, _SEARCH_ROLE)
+            item.setEditable(False)
+            self._search_model.appendRow(item)
+
+    def _target_id_from_completer_index(self, index: QModelIndex) -> str:
+        if not index.isValid():
+            return ""
+        completion_model = self._search_completer.completionModel()
+        proxy_index = completion_model.mapToSource(index)
+        source_index = self._search_proxy.mapToSource(proxy_index)
+        if not source_index.isValid():
+            return ""
+        target_id = self._search_model.data(source_index, _TARGET_ROLE)
+        return str(target_id) if target_id else ""
+
+    def _first_matching_target_id(self) -> str:
+        completion_model = self._search_completer.completionModel()
+        for row in range(completion_model.rowCount()):
+            target_id = self._target_id_from_completer_index(completion_model.index(row, 0))
+            if target_id:
+                return target_id
+        return ""
+
+    def _on_search_edited(self, text: str) -> None:
+        self._search_proxy.set_query(text)
+        if text.strip():
+            self._search_completer.complete()
+
+    def _on_search_activated(self, index: QModelIndex) -> None:
+        target_id = self._target_id_from_completer_index(index)
+        if not target_id:
+            return
+        self._search_edit.clear()
+        self._search_proxy.set_query("")
+        self._search_completer.popup().hide()
+        self._navigate_to_target(target_id)
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        if watched is self._search_edit and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                popup = self._search_completer.popup()
+                if popup.isVisible():
+                    idx = popup.currentIndex()
+                    if not idx.isValid() and popup.model().rowCount() > 0:
+                        idx = popup.model().index(0, 0)
+                    if idx.isValid():
+                        self._on_search_activated(idx)
+                        return True
+                target_id = self._first_matching_target_id()
+                if target_id:
+                    self._search_edit.clear()
+                    self._search_proxy.set_query("")
+                    self._navigate_to_target(target_id)
+                    return True
+        return super().eventFilter(watched, event)
+
+    def _navigate_to_target(self, target_id: str) -> None:
+        row = self._row_widgets.get(target_id)
+        focus_edit = self._row_focus_edits.get(target_id)
+        if row is None:
+            return
+
+        target = next((t for t in self._targets if t.target_id == target_id), None)
+        if target is not None:
+            section = self._sections.get(target.category)
+            if section is not None:
+                section.expand()
+
+        def _reveal() -> None:
+            self._scroll_row_to_center(row)
+            self._set_highlight(row)
+            if focus_edit is not None:
+                focus_edit.setFocus()
+
+        QTimer.singleShot(50, _reveal)
+
+    def _scroll_row_to_center(self, row: QWidget) -> None:
+        content = self._scroll.widget()
+        if content is None:
+            return
+        center = row.mapTo(content, QPoint(0, row.height() // 2))
+        bar = self._scroll.verticalScrollBar()
+        viewport_h = self._scroll.viewport().height()
+        value = center.y() - viewport_h // 2
+        value = max(bar.minimum(), min(bar.maximum(), value))
+        bar.setValue(value)
+
+    def _set_highlight(self, row: QFrame) -> None:
+        self._clear_highlight()
+        row.setProperty("highlighted", True)
+        row.style().unpolish(row)
+        row.style().polish(row)
+        self._highlighted_row = row
+        self._highlight_timer.start(_HIGHLIGHT_MS)
+
+    def _clear_highlight(self) -> None:
+        if self._highlighted_row is None:
+            return
+        row = self._highlighted_row
+        row.setProperty("highlighted", False)
+        row.style().unpolish(row)
+        row.style().polish(row)
+        self._highlighted_row = None
+
+    def _build_category_grid(self, _category: str, items: list[tuple[str, ShortcutEntry]]) -> QWidget:
         body = QWidget()
         grid = QGridLayout(body)
         grid.setContentsMargins(0, 0, 0, 0)
@@ -145,32 +328,52 @@ class ShortcutEditorDialog(QDialog):
 
         return body
 
+    def _make_row_frame(self, target_id: str, focus_edit: KeypadAwareKeySequenceEdit) -> QFrame:
+        row = QFrame()
+        row.setObjectName("shortcut_editor_row")
+        self._row_widgets[target_id] = row
+        self._row_focus_edits[target_id] = focus_edit
+        return row
+
     def _add_single_row(self, grid: QGridLayout, row: int, editor_row: EditorRowSingle, mono: str) -> None:
         action_id = editor_row.action_id
         entry = editor_row.entry
-        grid.addWidget(QLabel(entry.description), row, 0)
+        edit = self._make_key_edit(action_id, entry.default_key)
+        row_frame = self._make_row_frame(action_id, edit)
+        inner = QGridLayout(row_frame)
+        inner.setContentsMargins(4, 4, 4, 4)
+        inner.setHorizontalSpacing(12)
+        inner.setVerticalSpacing(0)
+
+        inner.addWidget(QLabel(entry.description), 0, 0)
         default_lbl = QLabel(entry.default_key or "—")
         default_lbl.setStyleSheet(mono)
-        grid.addWidget(default_lbl, row, 1)
-        edit = self._make_key_edit(action_id, entry.default_key)
-        grid.addWidget(edit, row, 2)
-        grid.addWidget(QLabel("—"), row, 3)
+        inner.addWidget(default_lbl, 0, 1)
+        inner.addWidget(edit, 0, 2)
+        inner.addWidget(QLabel("—"), 0, 3)
+        grid.addWidget(row_frame, row, 0, 1, 4)
 
     def _add_slider_row(self, grid: QGridLayout, row: int, editor_row: EditorRowSlider, mono: str) -> None:
         group = editor_row.group
         inc_entry = REGISTRY[group.inc_action]
         dec_entry = REGISTRY[group.dec_action]
 
-        grid.addWidget(QLabel(group.label), row, 0)
+        inc_edit = self._make_key_edit(group.inc_action, inc_entry.default_key)
+        dec_edit = self._make_key_edit(group.dec_action, dec_entry.default_key)
+        row_frame = self._make_row_frame(group.id, inc_edit)
+        inner = QGridLayout(row_frame)
+        inner.setContentsMargins(4, 4, 4, 4)
+        inner.setHorizontalSpacing(12)
+        inner.setVerticalSpacing(0)
+
+        inner.addWidget(QLabel(group.label), 0, 0)
         default_lbl = QLabel(_format_default_pair(inc_entry.default_key, dec_entry.default_key))
         default_lbl.setStyleSheet(mono)
-        grid.addWidget(default_lbl, row, 1)
+        inner.addWidget(default_lbl, 0, 1)
 
         shortcuts = QHBoxLayout()
         shortcuts.setContentsMargins(0, 0, 0, 0)
         shortcuts.setSpacing(6)
-        inc_edit = self._make_key_edit(group.inc_action, inc_entry.default_key)
-        dec_edit = self._make_key_edit(group.dec_action, dec_entry.default_key)
         sep = QLabel("/")
         sep.setStyleSheet(f"color: {THEME.text_muted};")
         shortcuts.addWidget(inc_edit, 1)
@@ -178,8 +381,9 @@ class ShortcutEditorDialog(QDialog):
         shortcuts.addWidget(dec_edit, 1)
         shortcuts_host = QWidget()
         shortcuts_host.setLayout(shortcuts)
-        grid.addWidget(shortcuts_host, row, 2)
-        grid.addWidget(self._make_step_edit(group), row, 3)
+        inner.addWidget(shortcuts_host, 0, 2)
+        inner.addWidget(self._make_step_edit(group), 0, 3)
+        grid.addWidget(row_frame, row, 0, 1, 4)
 
     def _make_key_edit(self, action_id: str, default_key: str) -> KeypadAwareKeySequenceEdit:
         edit = KeypadAwareKeySequenceEdit(QKeySequence(self._initial_bindings.get(action_id, default_key)))
@@ -207,6 +411,7 @@ class ShortcutEditorDialog(QDialog):
         for group_id, value in default_slider_steps().items():
             if group_id in self._step_edits:
                 self._step_edits[group_id].setValue(value)
+        self._reload_search_model()
 
     def _portable(self, edit: KeypadAwareKeySequenceEdit) -> str:
         return edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)

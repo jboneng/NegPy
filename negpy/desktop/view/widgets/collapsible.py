@@ -135,3 +135,7 @@ class CollapsibleSection(QWidget):
         self.content_area.setVisible(checked)
         self._update_chevron(checked)
         self.expanded_changed.emit(checked)
+
+    def expand(self) -> None:
+        if not self.toggle_button.isChecked():
+            self.toggle_button.setChecked(True)
