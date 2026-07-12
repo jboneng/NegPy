@@ -2,7 +2,7 @@
 
 Summary of available keyboard shortcuts in NegPy.
 
-All shortcuts, including slider adjustments, can be changed in-app from the `?` shortcut overlay via `Customize`.
+All shortcuts, including slider adjustments, can be changed in-app from the `?` shortcut overlay via `Customize`. Slider shortcuts are shown as merged rows (e.g. **Density ↑/↓**) with a customizable **Step** column — defaults match the built-in keyboard increments below.
 
 Numpad keys can be bound separately from the number row (e.g. `Num+9` vs `9`). Num Lock must be on for numpad digits to register.
 
@@ -15,11 +15,11 @@ Numpad keys can be bound separately from the number row (e.g. `Num+9` vs `9`). N
 ## Image Adjustments (High Speed)
 | Key | Action |
 |-----|--------|
-| `Q` / `A` | Increase / Decrease **Density** (0.01) |
-| `W` / `S` | Increase / Decrease **Grade** (0.01) |
-| `E` / `D` | Increase / Decrease **Magenta** (0.01) |
-| `R` / `F` | Increase / Decrease **Yellow** (0.01) |
-| `X` / `Z` | Increase / Decrease **Crop Offset** (1.0) |
+| `Q` / `A` | Increase / Decrease **Density** (default step 0.01) |
+| `W` / `S` | Increase / Decrease **Grade** (default step 10 ISO-R) |
+| `E` / `D` | Increase / Decrease **Magenta** (default step 0.01) |
+| `R` / `F` | Increase / Decrease **Yellow** (default step 0.01) |
+| `X` / `Z` | Increase / Decrease **Crop Offset** (default step 1 px) |
 
 ## Tools
 | Key | Action |

@@ -1,4 +1,18 @@
-from negpy.desktop.view.shortcut_registry import default_bindings, load_bindings, merge_bindings, save_bindings, tooltip_with_shortcut
+from negpy.desktop.view.shortcut_registry import (
+    REGISTRY,
+    EditorRowSlider,
+    category_editor_rows,
+    default_bindings,
+    default_slider_steps,
+    load_bindings,
+    load_slider_steps,
+    merge_bindings,
+    merge_slider_steps,
+    save_bindings,
+    save_slider_steps,
+    tooltip_with_shortcut,
+)
+from negpy.desktop.view.slider_shortcut_groups import SLIDER_GROUP_BY_ACTION, SLIDER_GROUPS
 
 
 class _Repo:
@@ -83,3 +97,50 @@ def test_tooltip_without_binding_returns_plain_text():
 
     assert tooltip == "Cyan up"
     assert "<div" not in tooltip
+
+
+def test_default_slider_steps_match_current_keyboard_behavior():
+    steps = default_slider_steps()
+    assert steps["density"] == 0.01
+    assert steps["grade"] == 10.0
+    assert steps["offset"] == 1.0
+    assert steps["temperature"] == 50.0
+    assert len(steps) == len(SLIDER_GROUPS)
+
+
+def test_save_slider_steps_only_persists_overrides():
+    repo = _Repo()
+    steps = default_slider_steps()
+    steps["density"] = 0.05
+
+    save_slider_steps(repo, steps)
+
+    assert repo.data["shortcut_slider_steps"] == {"density": 0.05}
+
+
+def test_load_slider_steps_merges_saved_overrides():
+    repo = _Repo()
+    repo.data["shortcut_slider_steps"] = {"grade": 5.0}
+
+    steps = load_slider_steps(repo)
+
+    assert steps["grade"] == 5.0
+    assert steps["density"] == 0.01
+
+
+def test_category_editor_rows_merge_slider_pairs():
+    exposure_items = [(action_id, entry) for action_id, entry in REGISTRY.items() if entry.category == "Exposure"]
+    rows = category_editor_rows(exposure_items)
+    labels = [row.group.label if isinstance(row, EditorRowSlider) else row.entry.description for row in rows]
+
+    assert "Density ↑/↓" in labels
+    assert "Density up" not in labels
+    assert "Density down" not in labels
+    assert "Magenta ↑/↓" in labels
+
+
+def test_every_slider_action_has_a_group():
+    slider_actions = {group.inc_action for group in SLIDER_GROUPS} | {group.dec_action for group in SLIDER_GROUPS}
+    for action_id in slider_actions:
+        assert action_id in REGISTRY
+        assert action_id in SLIDER_GROUP_BY_ACTION

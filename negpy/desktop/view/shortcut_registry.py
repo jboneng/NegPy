@@ -1,6 +1,13 @@
 from dataclasses import dataclass
 from typing import Iterable
 
+from negpy.desktop.view.slider_shortcut_groups import (
+    SLIDER_GROUPS,
+    SLIDER_GROUP_BY_ACTION,
+    SLIDER_GROUP_BY_ID,
+    SliderShortcutGroup,
+)
+
 
 @dataclass(frozen=True)
 class ShortcutEntry:
@@ -134,6 +141,81 @@ REGISTRY: dict[str, ShortcutEntry] = {
 }
 
 _CURRENT_BINDINGS: dict[str, str] = {}
+_CURRENT_SLIDER_STEPS: dict[str, float] = {}
+
+
+def default_slider_steps() -> dict[str, float]:
+    return {group.id: group.default_step for group in SLIDER_GROUPS}
+
+
+def merge_slider_steps(overrides: dict[str, float] | None = None) -> dict[str, float]:
+    steps = default_slider_steps()
+    if overrides:
+        for group_id, value in overrides.items():
+            if group_id in SLIDER_GROUP_BY_ID:
+                steps[group_id] = float(value)
+    return steps
+
+
+def load_slider_steps(repo) -> dict[str, float]:
+    saved = repo.get_global_setting("shortcut_slider_steps", {}) or {}
+    return merge_slider_steps(saved if isinstance(saved, dict) else {})
+
+
+def save_slider_steps(repo, steps: dict[str, float]) -> None:
+    defaults = default_slider_steps()
+    overrides = {
+        group_id: value
+        for group_id, value in steps.items()
+        if group_id in defaults and float(value) != defaults[group_id]
+    }
+    repo.save_global_setting("shortcut_slider_steps", overrides)
+
+
+def set_current_slider_steps(steps: dict[str, float]) -> None:
+    global _CURRENT_SLIDER_STEPS
+    _CURRENT_SLIDER_STEPS = merge_slider_steps(steps)
+
+
+def current_slider_steps() -> dict[str, float]:
+    if not _CURRENT_SLIDER_STEPS:
+        set_current_slider_steps(default_slider_steps())
+    return dict(_CURRENT_SLIDER_STEPS)
+
+
+def slider_step_for(group_id: str, steps: dict[str, float] | None = None) -> float:
+    resolved = steps or current_slider_steps()
+    return resolved.get(group_id, default_slider_steps()[group_id])
+
+
+@dataclass(frozen=True)
+class EditorRowSingle:
+    action_id: str
+    entry: ShortcutEntry
+
+
+@dataclass(frozen=True)
+class EditorRowSlider:
+    group: SliderShortcutGroup
+
+
+EditorRow = EditorRowSingle | EditorRowSlider
+
+
+def category_editor_rows(items: list[tuple[str, ShortcutEntry]]) -> list[EditorRow]:
+    """Merge paired slider shortcuts into one editor row, preserving registry order."""
+    rows: list[EditorRow] = []
+    seen_groups: set[str] = set()
+    for action_id, entry in items:
+        group = SLIDER_GROUP_BY_ACTION.get(action_id)
+        if group is not None:
+            if group.id in seen_groups:
+                continue
+            seen_groups.add(group.id)
+            rows.append(EditorRowSlider(group))
+            continue
+        rows.append(EditorRowSingle(action_id, entry))
+    return rows
 
 
 def default_bindings() -> dict[str, str]:
