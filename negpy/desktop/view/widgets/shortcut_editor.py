@@ -26,6 +26,7 @@ from negpy.desktop.view.shortcut_registry import (
     EditorRowSingle,
     EditorRowSlider,
     ShortcutEntry,
+    categories_in_order,
     category_editor_rows,
     default_bindings,
     default_slider_steps,
@@ -60,17 +61,6 @@ class _ShortcutSearchProxy(QSortFilterProxyModel):
         index = model.index(source_row, 0, source_parent)
         search_text = model.data(index, _SEARCH_ROLE) or ""
         return self._query in search_text
-
-
-def _categories_in_order() -> list[tuple[str, list[tuple[str, ShortcutEntry]]]]:
-    ordered: list[tuple[str, list[tuple[str, ShortcutEntry]]]] = []
-    index: dict[str, int] = {}
-    for action_id, entry in REGISTRY.items():
-        if entry.category not in index:
-            index[entry.category] = len(ordered)
-            ordered.append((entry.category, []))
-        ordered[index[entry.category]][1].append((action_id, entry))
-    return ordered
 
 
 def _format_default_pair(inc_key: str, dec_key: str) -> str:
@@ -152,7 +142,7 @@ class ShortcutEditorDialog(QDialog):
         sections_layout.setContentsMargins(0, 0, 0, 0)
         sections_layout.setSpacing(THEME.space_sm)
 
-        for category, items in _categories_in_order():
+        for category, items in categories_in_order():
             section = CollapsibleSection(category, expanded=False)
             section.set_content(self._build_category_grid(category, items))
             self._sections[category] = section

@@ -1,11 +1,45 @@
-from PyQt6.QtWidgets import QDialog, QVBoxLayout, QGridLayout, QLabel, QPushButton, QFrame, QHBoxLayout, QScrollArea, QWidget
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
+from negpy.desktop.view.shortcut_registry import (
+    REGISTRY,
+    EditorRowSingle,
+    EditorRowSlider,
+    categories_in_order,
+    category_editor_rows,
+    slider_step_for,
+)
 from negpy.desktop.view.styles.theme import THEME
-from negpy.desktop.view.shortcut_registry import REGISTRY
+from negpy.desktop.view.widgets.collapsible import CollapsibleSection
+
+
+def _format_key_pair(inc_key: str, dec_key: str) -> str:
+    inc = inc_key or "—"
+    dec = dec_key or "—"
+    return f"{inc} / {dec}"
+
+
+def _format_step_value(group, value: float) -> str:
+    if group.step_decimals == 0:
+        text = str(int(value)) if value == int(value) else str(value)
+    else:
+        text = f"{value:.{group.step_decimals}f}".rstrip("0").rstrip(".")
+    suffix = group.step_suffix or ""
+    return f"{text}{suffix}" if text else "—"
 
 
 class ShortcutsOverlay(QDialog):
-    """Modal keyboard shortcut reference, opened with '?'. Reads from REGISTRY."""
+    """Modal keyboard shortcut reference, opened with '?'."""
 
     def __init__(self, shortcut_manager, parent=None):
         super().__init__(parent)
@@ -13,62 +47,60 @@ class ShortcutsOverlay(QDialog):
         self.setWindowTitle("Keyboard Shortcuts")
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
         self.setModal(True)
-        self.resize(920, 700)
+        self.resize(820, 720)
         self._init_ui()
 
     def _init_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(0)
+        root.setContentsMargins(18, 18, 18, 18)
+        root.setSpacing(12)
 
         self.setStyleSheet(f"""
-            QDialog {{
-                background-color: {THEME.bg_panel};
-                border: 1px solid {THEME.border_primary};
-            }}
-            QLabel {{
-                color: {THEME.text_primary};
-                font-size: 12px;
-            }}
+            QDialog {{ background-color: {THEME.bg_panel}; }}
+            QLabel {{ color: {THEME.text_primary}; font-size: 12px; }}
+            QPushButton {{ padding: 6px 14px; }}
         """)
 
-        bindings = self._shortcut_manager.bindings
-        categories: dict[str, list] = {}
-        for action_id, entry in REGISTRY.items():
-            categories.setdefault(entry.category, []).append((action_id, entry))
+        intro = QLabel(
+            "Current keyboard shortcuts and slider step sizes. "
+            "Expand a section to browse bindings, or open Customize to change them."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
 
-        grouped_categories = list(categories.items())
-        left_column, right_column = self._split_categories(grouped_categories)
+        divider = QFrame()
+        divider.setFrameShape(QFrame.Shape.HLine)
+        divider.setStyleSheet(f"color: {THEME.border_color};")
+        root.addWidget(divider)
+
+        bindings = self._shortcut_manager.bindings
+        slider_steps = self._shortcut_manager.slider_steps
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
 
         container = QWidget()
-        columns = QHBoxLayout(container)
-        columns.setContentsMargins(0, 0, 0, 0)
-        columns.setSpacing(20)
+        sections_layout = QVBoxLayout(container)
+        sections_layout.setContentsMargins(0, 0, 0, 0)
+        sections_layout.setSpacing(THEME.space_sm)
 
-        self._add_category_column(columns, left_column, bindings)
-        self._add_category_column(columns, right_column, bindings)
+        for category, items in categories_in_order():
+            section = CollapsibleSection(category, expanded=False)
+            section.set_content(self._build_category_grid(items, bindings, slider_steps))
+            sections_layout.addWidget(section)
 
+        sections_layout.addStretch()
         scroll.setWidget(container)
         root.addWidget(scroll, stretch=1)
-        root.addSpacing(16)
 
         actions = QHBoxLayout()
         customize_btn = QPushButton("Customize")
-        # Padding-only override: a widget-level `background:` would beat the app
-        # stylesheet in every state and kill the global hover/pressed feedback.
-        customize_btn.setStyleSheet("font-size: 12px; padding: 6px 20px;")
         customize_btn.clicked.connect(self._customize)
         actions.addWidget(customize_btn)
         actions.addStretch()
 
         close_btn = QPushButton("Close")
-        close_btn.setStyleSheet("font-size: 12px; padding: 6px 20px;")
-        # Primary action styling from the app stylesheet (accent fill with its own
-        # hover/pressed shades), same as the Export panel's call-to-action.
         close_btn.setProperty("primary", True)
         close_btn.clicked.connect(self.accept)
         actions.addWidget(close_btn)
@@ -78,69 +110,100 @@ class ShortcutsOverlay(QDialog):
         if self._shortcut_manager.open_editor(self):
             self.accept()
 
-    def _split_categories(self, grouped_categories: list[tuple[str, list]]) -> tuple[list[tuple[str, list]], list[tuple[str, list]]]:
-        left_column: list[tuple[str, list]] = []
-        right_column: list[tuple[str, list]] = []
-        left_weight = 0
-        right_weight = 0
+    def _build_category_grid(
+        self,
+        items: list,
+        bindings: dict[str, str],
+        slider_steps: dict[str, float],
+    ) -> QWidget:
+        body = QWidget()
+        grid = QGridLayout(body)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
 
-        for category in grouped_categories:
-            weight = len(category[1]) + 1
-            if left_weight <= right_weight:
-                left_column.append(category)
-                left_weight += weight
+        header_style = (
+            f"color: {THEME.text_muted}; font-size: {THEME.font_size_xs}px; "
+            f"font-weight: {THEME.weight_semibold};"
+        )
+        for col, label in enumerate(("Action", "Default", "Shortcut", "Step")):
+            hdr = QLabel(label)
+            hdr.setStyleSheet(header_style)
+            grid.addWidget(hdr, 0, col)
+
+        mono = f"color: {THEME.text_secondary}; font-family: Consolas, monospace;"
+        for row, editor_row in enumerate(category_editor_rows(items), start=1):
+            if isinstance(editor_row, EditorRowSlider):
+                self._add_slider_row(grid, row, editor_row, bindings, slider_steps, mono)
             else:
-                right_column.append(category)
-                right_weight += weight
+                self._add_single_row(grid, row, editor_row, bindings, mono)
 
-        return left_column, right_column
+        return body
 
-    def _add_category_column(
-        self, parent_layout: QHBoxLayout, grouped_categories: list[tuple[str, list]], bindings: dict[str, str]
+    def _keycap(self, text: str) -> QLabel:
+        lbl = QLabel(text or "—")
+        lbl.setStyleSheet(f"""
+            color: {THEME.text_primary};
+            background-color: {THEME.bg_header};
+            border: 1px solid {THEME.border_primary};
+            border-radius: 3px;
+            font-family: Consolas, monospace;
+            font-size: 11px;
+            padding: 2px 6px;
+        """)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        return lbl
+
+    def _mono_label(self, text: str, mono: str) -> QLabel:
+        lbl = QLabel(text or "—")
+        lbl.setStyleSheet(mono)
+        return lbl
+
+    def _add_single_row(
+        self,
+        grid: QGridLayout,
+        row: int,
+        editor_row: EditorRowSingle,
+        bindings: dict[str, str],
+        mono: str,
     ) -> None:
-        column_widget = QWidget()
-        column_layout = QVBoxLayout(column_widget)
-        column_layout.setContentsMargins(0, 0, 0, 0)
-        column_layout.setSpacing(10)
+        entry = editor_row.entry
+        grid.addWidget(QLabel(entry.description), row, 0)
+        grid.addWidget(self._mono_label(entry.default_key, mono), row, 1)
+        grid.addWidget(self._keycap(bindings.get(editor_row.action_id, "")), row, 2)
+        grid.addWidget(QLabel("—"), row, 3)
 
-        for index, (category, entries) in enumerate(grouped_categories):
-            if index > 0:
-                sep = QFrame()
-                sep.setFrameShape(QFrame.Shape.HLine)
-                sep.setStyleSheet(f"background-color: {THEME.border_primary}; border: none; margin: 4px 0;")
-                sep.setFixedHeight(1)
-                column_layout.addWidget(sep)
+    def _add_slider_row(
+        self,
+        grid: QGridLayout,
+        row: int,
+        editor_row: EditorRowSlider,
+        bindings: dict[str, str],
+        slider_steps: dict[str, float],
+        mono: str,
+    ) -> None:
+        group = editor_row.group
+        inc_entry = REGISTRY[group.inc_action]
+        dec_entry = REGISTRY[group.dec_action]
 
-            cat_lbl = QLabel(category)
-            cat_lbl.setStyleSheet(f"color: {THEME.text_secondary}; font-size: 10px; font-weight: bold; padding: 6px 0 2px 0;")
-            column_layout.addWidget(cat_lbl)
+        grid.addWidget(QLabel(group.label), row, 0)
+        grid.addWidget(
+            self._mono_label(_format_key_pair(inc_entry.default_key, dec_entry.default_key), mono),
+            row,
+            1,
+        )
 
-            grid = QGridLayout()
-            grid.setContentsMargins(0, 0, 0, 0)
-            grid.setHorizontalSpacing(8)
-            grid.setVerticalSpacing(6)
-            grid.setColumnMinimumWidth(0, 90)
-            grid.setColumnMinimumWidth(1, 240)
+        shortcuts = QHBoxLayout()
+        shortcuts.setContentsMargins(0, 0, 0, 0)
+        shortcuts.setSpacing(6)
+        shortcuts.addWidget(self._keycap(bindings.get(group.inc_action, "")), 1)
+        sep = QLabel("/")
+        sep.setStyleSheet(f"color: {THEME.text_muted};")
+        shortcuts.addWidget(sep)
+        shortcuts.addWidget(self._keycap(bindings.get(group.dec_action, "")), 1)
+        shortcuts_host = QWidget()
+        shortcuts_host.setLayout(shortcuts)
+        grid.addWidget(shortcuts_host, row, 2)
 
-            for row, (action_id, entry) in enumerate(entries):
-                key_lbl = QLabel(bindings.get(action_id, ""))
-                key_lbl.setStyleSheet(f"""
-                    color: {THEME.text_primary};
-                    background-color: {THEME.bg_header};
-                    border: 1px solid {THEME.border_primary};
-                    border-radius: 3px;
-                    font-family: monospace;
-                    font-size: 11px;
-                    padding: 1px 5px;
-                """)
-                key_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                desc_lbl = QLabel(entry.description)
-                desc_lbl.setWordWrap(True)
-                desc_lbl.setStyleSheet(f"color: {THEME.text_secondary}; font-size: 12px; padding-left: 4px;")
-                grid.addWidget(key_lbl, row, 0, alignment=Qt.AlignmentFlag.AlignTop)
-                grid.addWidget(desc_lbl, row, 1)
-
-            column_layout.addLayout(grid)
-
-        column_layout.addStretch()
-        parent_layout.addWidget(column_widget, stretch=1)
+        step_value = slider_step_for(group.id, slider_steps)
+        grid.addWidget(QLabel(_format_step_value(group, step_value)), row, 3)

@@ -202,6 +202,17 @@ class EditorRowSlider:
 EditorRow = EditorRowSingle | EditorRowSlider
 
 
+def categories_in_order() -> list[tuple[str, list[tuple[str, ShortcutEntry]]]]:
+    ordered: list[tuple[str, list[tuple[str, ShortcutEntry]]]] = []
+    index: dict[str, int] = {}
+    for action_id, entry in REGISTRY.items():
+        if entry.category not in index:
+            index[entry.category] = len(ordered)
+            ordered.append((entry.category, []))
+        ordered[index[entry.category]][1].append((action_id, entry))
+    return ordered
+
+
 def category_editor_rows(items: list[tuple[str, ShortcutEntry]]) -> list[EditorRow]:
     """Merge paired slider shortcuts into one editor row, preserving registry order."""
     rows: list[EditorRow] = []
