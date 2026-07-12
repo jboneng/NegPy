@@ -7,7 +7,6 @@ from negpy.desktop.view.shortcut_registry import (
     load_bindings,
     load_slider_steps,
     merge_bindings,
-    merge_slider_steps,
     save_bindings,
     save_slider_steps,
     tooltip_with_shortcut,
