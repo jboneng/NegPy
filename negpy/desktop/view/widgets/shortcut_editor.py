@@ -13,9 +13,21 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from negpy.desktop.view.shortcut_registry import REGISTRY, default_bindings
+from negpy.desktop.view.shortcut_registry import REGISTRY, ShortcutEntry, default_bindings
+from negpy.desktop.view.widgets.collapsible import CollapsibleSection
 from negpy.desktop.view.widgets.key_sequence_edit import KeypadAwareKeySequenceEdit
 from negpy.desktop.view.styles.theme import THEME
+
+
+def _categories_in_order() -> list[tuple[str, list[tuple[str, ShortcutEntry]]]]:
+    ordered: list[tuple[str, list[tuple[str, ShortcutEntry]]]] = []
+    index: dict[str, int] = {}
+    for action_id, entry in REGISTRY.items():
+        if entry.category not in index:
+            index[entry.category] = len(ordered)
+            ordered.append((entry.category, []))
+        ordered[index[entry.category]][1].append((action_id, entry))
+    return ordered
 
 
 class ShortcutEditorDialog(QDialog):
@@ -63,33 +75,16 @@ class ShortcutEditorDialog(QDialog):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         container = QWidget()
-        grid = QGridLayout(container)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(8)
+        sections_layout = QVBoxLayout(container)
+        sections_layout.setContentsMargins(0, 0, 0, 0)
+        sections_layout.setSpacing(THEME.space_sm)
 
-        row = 0
-        last_category = None
-        for action_id, entry in REGISTRY.items():
-            if entry.category != last_category:
-                category = QLabel(entry.category)
-                category.setStyleSheet(f"color: {THEME.text_secondary}; font-weight: bold; padding-top: 8px;")
-                grid.addWidget(category, row, 0, 1, 3)
-                row += 1
-                last_category = entry.category
+        for category, items in _categories_in_order():
+            section = CollapsibleSection(category, expanded=False)
+            section.set_content(self._build_category_grid(items))
+            sections_layout.addWidget(section)
 
-            desc = QLabel(entry.description)
-            default_lbl = QLabel(entry.default_key)
-            default_lbl.setStyleSheet(f"color: {THEME.text_secondary}; font-family: Consolas, monospace;")
-            edit = KeypadAwareKeySequenceEdit(QKeySequence(self._initial_bindings.get(action_id, entry.default_key)))
-            edit.setClearButtonEnabled(True)
-            self._edits[action_id] = edit
-
-            grid.addWidget(desc, row, 0)
-            grid.addWidget(default_lbl, row, 1)
-            grid.addWidget(edit, row, 2)
-            row += 1
-
+        sections_layout.addStretch()
         scroll.setWidget(container)
         root.addWidget(scroll, stretch=1)
 
@@ -105,6 +100,37 @@ class ShortcutEditorDialog(QDialog):
         buttons.addWidget(cancel_btn)
         buttons.addWidget(save_btn)
         root.addLayout(buttons)
+
+    def _build_category_grid(self, items: list[tuple[str, ShortcutEntry]]) -> QWidget:
+        body = QWidget()
+        grid = QGridLayout(body)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(8)
+
+        header_style = (
+            f"color: {THEME.text_muted}; font-size: {THEME.font_size_xs}px; "
+            f"font-weight: {THEME.weight_semibold};"
+        )
+        for col, label in enumerate(("Action", "Default", "Shortcut")):
+            hdr = QLabel(label)
+            hdr.setStyleSheet(header_style)
+            grid.addWidget(hdr, 0, col)
+
+        mono = f"color: {THEME.text_secondary}; font-family: Consolas, monospace;"
+        for row, (action_id, entry) in enumerate(items, start=1):
+            desc = QLabel(entry.description)
+            default_lbl = QLabel(entry.default_key or "—")
+            default_lbl.setStyleSheet(mono)
+            edit = KeypadAwareKeySequenceEdit(QKeySequence(self._initial_bindings.get(action_id, entry.default_key)))
+            edit.setClearButtonEnabled(True)
+            self._edits[action_id] = edit
+
+            grid.addWidget(desc, row, 0)
+            grid.addWidget(default_lbl, row, 1)
+            grid.addWidget(edit, row, 2)
+
+        return body
 
     def _reset_all(self) -> None:
         for action_id, key in default_bindings().items():
