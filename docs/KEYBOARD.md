@@ -4,6 +4,8 @@ Summary of available keyboard shortcuts in NegPy.
 
 All shortcuts, including slider adjustments, can be changed in-app from the `?` shortcut overlay via `Customize`.
 
+Numpad keys can be bound separately from the number row (e.g. `Num+9` vs `9`). Num Lock must be on for numpad digits to register.
+
 ## Navigation
 | Key | Action |
 |-----|--------|

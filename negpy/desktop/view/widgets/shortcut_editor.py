@@ -11,10 +11,10 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QVBoxLayout,
     QWidget,
-    QKeySequenceEdit,
 )
 
 from negpy.desktop.view.shortcut_registry import REGISTRY, default_bindings
+from negpy.desktop.view.widgets.key_sequence_edit import KeypadAwareKeySequenceEdit
 from negpy.desktop.view.styles.theme import THEME
 
 
@@ -23,7 +23,7 @@ class ShortcutEditorDialog(QDialog):
         super().__init__(parent)
         self._initial_bindings = dict(bindings)
         self._session = session
-        self._edits: dict[str, QKeySequenceEdit] = {}
+        self._edits: dict[str, KeypadAwareKeySequenceEdit] = {}
         self.setWindowTitle("Customize Shortcuts")
         self.resize(760, 720)
         self._init_ui()
@@ -81,7 +81,7 @@ class ShortcutEditorDialog(QDialog):
             desc = QLabel(entry.description)
             default_lbl = QLabel(entry.default_key)
             default_lbl.setStyleSheet(f"color: {THEME.text_secondary}; font-family: Consolas, monospace;")
-            edit = QKeySequenceEdit(QKeySequence(self._initial_bindings.get(action_id, entry.default_key)))
+            edit = KeypadAwareKeySequenceEdit(QKeySequence(self._initial_bindings.get(action_id, entry.default_key)))
             edit.setClearButtonEnabled(True)
             self._edits[action_id] = edit
 
@@ -110,7 +110,7 @@ class ShortcutEditorDialog(QDialog):
         for action_id, key in default_bindings().items():
             self._edits[action_id].setKeySequence(QKeySequence(key))
 
-    def _portable(self, edit: QKeySequenceEdit) -> str:
+    def _portable(self, edit: KeypadAwareKeySequenceEdit) -> str:
         return edit.keySequence().toString(QKeySequence.SequenceFormat.PortableText)
 
     def bindings(self) -> dict[str, str]:
