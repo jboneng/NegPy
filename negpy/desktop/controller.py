@@ -69,6 +69,8 @@ from negpy.services.view.coordinate_mapping import CoordinateMapping
 
 logger = get_logger(__name__)
 
+_THUMB_FAILED_MSG = "thumbnail failed — file may be unreadable"
+
 
 @dataclass(frozen=True)
 class _PendingCaptureImport:
@@ -400,6 +402,7 @@ class AppController(QObject):
         self.preview_load_worker.splash.connect(self._on_splash_preview)
         self.preview_load_worker.finished.connect(self._on_preview_loaded)
         self.preview_load_worker.error.connect(self._on_render_error)
+        self.preview_load_worker.load_failed.connect(self._on_preview_load_failed)
 
         self.scan_devices_requested.connect(self.scan_worker.list_devices)
         self.scan_worker.devices_ready.connect(self.scan_devices_ready.emit)
@@ -439,6 +442,7 @@ class AppController(QObject):
     def generate_missing_thumbnails(self) -> None:
         missing = [f for f in self.state.uploaded_files if f["name"] not in self.state.thumbnails]
         if missing:
+            self._thumb_requested = [f["name"] for f in missing]
             self.set_status("GENERATING THUMBNAILS...")
             self._begin_batch("Generating thumbnails", abortable=False)
             self.thumbnail_requested.emit(missing)
@@ -456,6 +460,18 @@ class AppController(QObject):
             if pil_img:
                 u8_arr = np.array(pil_img.convert("RGB"))
                 self.state.thumbnails[name] = QIcon(QPixmap.fromImage(ImageConverter.to_qimage(u8_arr)))
+
+        # Consume the request list: update_rendered() re-emits this same signal with
+        # single-file dicts after every settled render, and evaluating those against
+        # a stale batch list would falsely badge every other frame.
+        requested = getattr(self, "_thumb_requested", [])
+        self._thumb_requested = []
+        failed = {n for n in requested if not new_thumbs.get(n)}
+        for f in self.state.uploaded_files:
+            if f["name"] in failed:
+                f.setdefault("decode_failed", _THUMB_FAILED_MSG)
+            elif f["name"] in new_thumbs and f.get("decode_failed") == _THUMB_FAILED_MSG:
+                del f["decode_failed"]
         self.session.asset_model.refresh()
 
     # --- Batch progress popup -------------------------------------------------
@@ -707,7 +723,17 @@ class AppController(QObject):
             self.state.last_metrics["splash"] = True
         self.image_updated.emit()
 
+    def _on_preview_load_failed(self, file_path: str, message: str) -> None:
+        for f in self.state.uploaded_files:
+            if f["path"] == file_path:
+                f["decode_failed"] = message
+                self.session.asset_model.refresh()
+                return
+
     def _on_preview_loaded(self, file_path: str, raw: Any, dims: Any, source_cs: str, ir_preview: Any, detected_mode: str) -> None:
+        for f in self.state.uploaded_files:
+            if f["path"] == file_path and f.pop("decode_failed", None) is not None:
+                self.session.asset_model.refresh()
         if self._requested_file_path != file_path:
             return
         logger.info(
@@ -1315,9 +1341,14 @@ class AppController(QObject):
             crop_status = f"Crop status: all {total} files are cropped."
             crop_warning = "Analysis will run on each file's cropped negative area."
 
+        sheet_note = ""
+        if self.session.asset_model.sheet_filter != "all":
+            sheet_note = f"Note: the Sheet filter is on — only the {total} visible frame(s) are analyzed.\n\n"
+
         reply = QMessageBox.question(
             None,
             "Batch Analysis",
+            f"{sheet_note}"
             f"{crop_status}\n"
             f"{crop_warning}\n\n"
             "Batch Analysis measures the exposure bounds of every file and applies "
@@ -1375,6 +1406,9 @@ class AppController(QObject):
                 roll_name=None,
             )
             new_p = replace(p, process=new_process)
+            # The active file records its step via update_config(persist=True) below.
+            if f_info["hash"] != self.state.current_file_hash:
+                self.session.push_external_history(f_info["hash"], p, new_p)
             self.session.repo.save_file_settings(f_info["hash"], new_p, file_path=f_info["path"])
 
         # Update current state
@@ -1423,6 +1457,8 @@ class AppController(QObject):
                     roll_name=name,
                 )
                 new_p = replace(p, process=new_process)
+                if f_info["hash"] != self.state.current_file_hash:
+                    self.session.push_external_history(f_info["hash"], p, new_p)
                 self.session.repo.save_file_settings(f_info["hash"], new_p, file_path=f_info["path"])
 
             new_process = replace(
@@ -1436,6 +1472,19 @@ class AppController(QObject):
             self.session.update_config(replace(self.state.config, process=new_process), persist=True)
             self.set_status(f"Applied Roll '{name}'", 2000)
             self.request_render()
+
+    def clear_roll_baseline(self) -> None:
+        """Roll Analysis section reset: take the current frame off the roll baseline
+        (both averaging axes + named roll) and re-meter it per-frame."""
+        new_process = replace(
+            self.state.config.process,
+            use_luma_average=False,
+            use_colour_average=False,
+            roll_name=None,
+            **invalidate_local_bounds(self.state.config.process),
+        )
+        self.session.update_config(replace(self.state.config, process=new_process), persist=True)
+        self.request_render()
 
     def reanalyze_current_file(self) -> None:
         """
@@ -1953,7 +2002,7 @@ class AppController(QObject):
     def request_export_selected(self) -> None:
         """Batch-exports the currently selected files using each file's own saved settings."""
         selected = [self.state.uploaded_files[i] for i in self.state.selected_indices if 0 <= i < len(self.state.uploaded_files)]
-        self.request_batch_export(files=selected)
+        self.request_batch_export(files=[f for f in selected if not f.get("excluded")])
 
     def request_batch_export(self, override_settings: bool = False, files: list[dict] | None = None) -> None:
         """Batch-exports the given files (all visible by default) using current settings, optionally applied to all."""
@@ -1967,7 +2016,11 @@ class AppController(QObject):
         sync_metadata = self.state.config.metadata.sync_to_batch
 
         if files is None:
-            files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+            files = [
+                self.state.uploaded_files[i]
+                for i in self.session.asset_model.visible_actual_indices_ordered()
+                if not self.state.uploaded_files[i].get("excluded")
+            ]
 
         if len(files) > 1 and not self._confirm_bulk_export(f"Export {len(files)} frames?"):
             return
@@ -2210,7 +2263,11 @@ class AppController(QObject):
 
     def export_edit_sidecars(self) -> None:
         """Explicit batch sidecar export for all visible files (ignores the on-export toggle)."""
-        visible_files = [self.state.uploaded_files[i] for i in self.session.asset_model.visible_actual_indices_ordered()]
+        visible_files = [
+            self.state.uploaded_files[i]
+            for i in self.session.asset_model.visible_actual_indices_ordered()
+            if not self.state.uploaded_files[i].get("excluded")
+        ]
         if not visible_files:
             return
         written = self._write_edit_sidecars(visible_files)
