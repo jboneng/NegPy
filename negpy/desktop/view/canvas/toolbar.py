@@ -57,6 +57,7 @@ class ActionToolbar(QWidget):
 
         container = QFrame()
         container.setObjectName("toolbar_container")
+        self._toolbar_container = container
         v_layout = QVBoxLayout(container)
         v_layout.setContentsMargins(6, 4, 6, 4)
         v_layout.setSpacing(0)
@@ -205,6 +206,25 @@ class ActionToolbar(QWidget):
             action.setVisible(False)
             self._ov_color_actions.append(action)
 
+        # Overflow: compare / flat peek / zoom extras / undo (collapsed when the pill
+        # would exceed the canvas width — see set_available_width).
+        self._ov_sep_responsive = overflow_menu.addSeparator()
+        self._ov_sep_responsive.setVisible(False)
+        self._ov_fit_action = overflow_menu.addAction(qta.icon("fa5s.expand", color=icon_color), "Fit to Window")
+        self._ov_fit_action.setVisible(False)
+        self._ov_original_action = overflow_menu.addAction("Original Size (1:1)")
+        self._ov_original_action.setVisible(False)
+        self._ov_compare_action = overflow_menu.addAction(qta.icon("fa5s.adjust", color=icon_color), "Before / After")
+        self._ov_compare_action.setCheckable(True)
+        self._ov_compare_action.setVisible(False)
+        self._ov_flat_peek_action = overflow_menu.addAction(qta.icon("fa5s.eye", color=icon_color), "Peek Flat Scan")
+        self._ov_flat_peek_action.setCheckable(True)
+        self._ov_flat_peek_action.setVisible(False)
+        self._ov_undo_action = overflow_menu.addAction(qta.icon("mdi.undo", color=icon_color), "Undo")
+        self._ov_undo_action.setVisible(False)
+        self._ov_redo_action = overflow_menu.addAction(qta.icon("mdi.redo", color=icon_color), "Redo")
+        self._ov_redo_action.setVisible(False)
+
         # Overflow: flip + rotate group (<580px)
         self._ov_sep_main = overflow_menu.addSeparator()
         self._ov_sep_main.setVisible(False)
@@ -269,6 +289,7 @@ class ActionToolbar(QWidget):
             self.btn_redo,
             self.btn_hq,
             self.btn_compare,
+            self.btn_flat_peek,
             self.btn_gpu,
             self.btn_overflow,
         ]
@@ -311,9 +332,19 @@ class ActionToolbar(QWidget):
         row_layout.addWidget(self.btn_overflow)
         row_layout.addWidget(self.btn_toggle_right)
 
-        # Overflow groups for responsive resizeEvent
+        # Overflow groups for responsive resize (first listed = first collapsed).
+        self._ov_compare_peek: list = [self.btn_compare, self.btn_flat_peek]
+        self._ov_undo_redo: list = [self._sep3, self.btn_undo, self.btn_redo]
+        self._ov_zoom_extra: list = [self.btn_zoom_fit, self.btn_zoom_original]
         self._ov_swatches_hq: list = [self.btn_hq] + self.canvas_color_btns + [self._sep2]
         self._ov_flip_rotate: list = [self.btn_rot_l, self.btn_rot_r, self.btn_flip_h, self.btn_flip_v, self._sep3]
+        self._collapse_groups: list = [
+            self._ov_compare_peek,
+            self._ov_undo_redo,
+            self._ov_zoom_extra,
+            self._ov_swatches_hq,
+            self._ov_flip_rotate,
+        ]
 
         v_layout.addLayout(row_layout)
         # Size the pill to its controls; don't stretch it across the canvas.
@@ -323,6 +354,9 @@ class ActionToolbar(QWidget):
         self.btn_flat_peek.blockSignals(True)
         self.btn_flat_peek.setChecked(active)
         self.btn_flat_peek.blockSignals(False)
+        self._ov_flat_peek_action.blockSignals(True)
+        self._ov_flat_peek_action.setChecked(active)
+        self._ov_flat_peek_action.blockSignals(False)
 
     def _connect_signals(self) -> None:
         self.btn_prev.clicked.connect(self.session.prev_file)
@@ -345,6 +379,7 @@ class ActionToolbar(QWidget):
         self.btn_hq.clicked.connect(self.controller.toggle_hq_preview)
         self.btn_compare.clicked.connect(self.controller.toggle_compare)
         self.controller.compare_changed.connect(self.btn_compare.setChecked)
+        self.controller.compare_changed.connect(self._ov_compare_action.setChecked)
         self.btn_flat_peek.toggled.connect(lambda checked: self.controller.toggle_flat_peek(force=checked))
         self.controller.flat_peek_changed.connect(self._on_flat_peek_changed)
         self.btn_gpu.toggled.connect(self._on_gpu_toggled)
@@ -361,6 +396,12 @@ class ActionToolbar(QWidget):
         self._ov_rot_r_action.triggered.connect(lambda: self.rotate(-1))
         self._ov_flip_h_action.triggered.connect(lambda: self.flip("horizontal"))
         self._ov_flip_v_action.triggered.connect(lambda: self.flip("vertical"))
+        self._ov_fit_action.triggered.connect(self._on_fit_clicked)
+        self._ov_original_action.triggered.connect(self._on_original_clicked)
+        self._ov_compare_action.triggered.connect(self.controller.toggle_compare)
+        self._ov_flat_peek_action.triggered.connect(lambda checked: self.controller.toggle_flat_peek(force=checked))
+        self._ov_undo_action.triggered.connect(lambda: _context_undo(self.controller))
+        self._ov_redo_action.triggered.connect(self.session.redo)
 
     def _on_overflow_unload(self) -> None:
         from negpy.desktop.view.confirm import confirm_unload
@@ -498,6 +539,10 @@ class ActionToolbar(QWidget):
         self.btn_next.setEnabled(0 <= display_idx < model.rowCount() - 1)
         self.btn_hq.setChecked(state.hq_preview)
         self._ov_hq_action.setChecked(state.hq_preview)
+        self.btn_compare.setChecked(state.compare_mode)
+        self._ov_compare_action.setChecked(state.compare_mode)
+        self.btn_flat_peek.setChecked(state.flat_peek)
+        self._ov_flat_peek_action.setChecked(state.flat_peek)
 
         geo = state.config.geometry
         self.btn_flip_h.setChecked(geo.flip_horizontal)
@@ -507,25 +552,86 @@ class ActionToolbar(QWidget):
 
         self.btn_undo.setEnabled(state.undo_index > 0)
         self.btn_redo.setEnabled(state.undo_index < state.max_history_index)
+        self._ov_undo_action.setEnabled(state.undo_index > 0)
+        self._ov_redo_action.setEnabled(state.undo_index < state.max_history_index)
         self._action_paste.setEnabled(state.clipboard is not None)
 
-    def set_available_width(self, w: int) -> None:
-        """Responsive overflow keyed on the hosting canvas width (the toolbar itself
-        floats at sizeHint size, so its own width no longer reflects available space)."""
-        show_swatches_hq = w >= 720
-        show_flip_rotate = w >= 580
+    @staticmethod
+    def _toolbar_width_budget(canvas_width: int) -> int:
+        """Horizontal space the pill may occupy inside the canvas."""
+        return max(240, canvas_width - 2 * THEME.space_xl)
 
-        for widget in self._ov_swatches_hq:
-            widget.setVisible(show_swatches_hq)
+    def _activate_layout(self) -> None:
+        layout = self.layout()
+        if layout is not None:
+            layout.activate()
+        container = self._toolbar_container
+        if container is not None:
+            inner = container.layout()
+            if inner is not None:
+                inner.activate()
+
+    def _pill_width(self) -> int:
+        """Measured pill width after the current visibility set (sizeHint can stay stale)."""
+        self._activate_layout()
+        self.adjustSize()
+        return self.minimumSizeHint().width()
+
+    def pill_size_hint(self) -> QSize:
+        """Preferred floating size for the canvas layout pass."""
+        self._activate_layout()
+        self.adjustSize()
+        base = self.sizeHint()
+        return QSize(self._pill_width(), base.height())
+
+    def _sync_responsive_overflow_menu(self) -> None:
+        """Mirror collapsed toolbar groups into the overflow menu."""
+        show_swatches_hq = not all(not w.isVisible() for w in self._ov_swatches_hq)
+        show_flip_rotate = not all(not w.isVisible() for w in self._ov_flip_rotate)
+        show_compare_peek = not all(not w.isVisible() for w in self._ov_compare_peek)
+        show_undo_redo = not all(not w.isVisible() for w in self._ov_undo_redo)
+        show_zoom_extra = not all(not w.isVisible() for w in self._ov_zoom_extra)
+
         self._ov_hq_action.setVisible(not show_swatches_hq)
         for action in self._ov_color_actions:
             action.setVisible(not show_swatches_hq)
 
-        for widget in self._ov_flip_rotate:
-            widget.setVisible(show_flip_rotate)
         self._ov_sep_main.setVisible(not show_flip_rotate)
         self._ov_rot_l_action.setVisible(not show_flip_rotate)
         self._ov_rot_r_action.setVisible(not show_flip_rotate)
         self._ov_flip_h_action.setVisible(not show_flip_rotate)
         self._ov_flip_v_action.setVisible(not show_flip_rotate)
         self._ov_sep_rotate.setVisible(not show_flip_rotate)
+
+        self._ov_fit_action.setVisible(not show_zoom_extra)
+        self._ov_original_action.setVisible(not show_zoom_extra)
+        self._ov_compare_action.setVisible(not show_compare_peek)
+        self._ov_flat_peek_action.setVisible(not show_compare_peek)
+        self._ov_undo_action.setVisible(not show_undo_redo)
+        self._ov_redo_action.setVisible(not show_undo_redo)
+        self._ov_sep_responsive.setVisible(
+            not show_zoom_extra or not show_compare_peek or not show_undo_redo
+        )
+
+    def set_available_width(self, w: int) -> None:
+        """Show as many toolbar groups as fit the canvas width.
+
+        Grow from a minimal core (nav, zoom, GPU, overflow) by re-adding optional
+        groups until the measured pill width would exceed the budget, then mirror
+        anything still hidden into the overflow menu."""
+        budget = self._toolbar_width_budget(w)
+
+        for group in self._collapse_groups:
+            for widget in group:
+                widget.setVisible(False)
+
+        for group in reversed(self._collapse_groups):
+            for widget in group:
+                widget.setVisible(True)
+            if self._pill_width() > budget:
+                for widget in group:
+                    widget.setVisible(False)
+
+        self._activate_layout()
+        self.adjustSize()
+        self._sync_responsive_overflow_menu()

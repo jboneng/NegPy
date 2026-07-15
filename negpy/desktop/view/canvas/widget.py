@@ -10,6 +10,7 @@ from negpy.desktop.view.canvas.hud import CanvasHud
 from negpy.desktop.view.canvas.overlay import CanvasOverlay
 from negpy.infrastructure.gpu.device import GPUDevice
 from negpy.infrastructure.gpu.resources import GPUTexture
+from negpy.desktop.view.styles.theme import THEME
 from negpy.kernel.system.config import APP_CONFIG
 from negpy.kernel.system.logging import get_logger
 
@@ -17,6 +18,10 @@ if TYPE_CHECKING:
     from negpy.desktop.controller import AppController
 
 logger = get_logger(__name__)
+
+# Inset for the floating bottom toolbar so the pill is not flush against / clipped
+# by the canvas edge on tight laptop layouts.
+_TOOLBAR_INSET = THEME.space_xl
 
 
 def clamp_canvas_zoom_level(zoom: float) -> float:
@@ -192,8 +197,13 @@ class ImageCanvas(QWidget):
         if tb is not None:
             if hasattr(tb, "set_available_width"):
                 tb.set_available_width(self.width())
-            size = tb.sizeHint()
-            tb.setGeometry((self.width() - size.width()) // 2, self.height() - size.height(), size.width(), size.height())
+            size = tb.pill_size_hint() if hasattr(tb, "pill_size_hint") else tb.sizeHint()
+            tw, th = size.width(), size.height()
+            inset = _TOOLBAR_INSET
+            x = (self.width() - tw) // 2
+            x = max(inset, min(x, self.width() - tw - inset))
+            y = max(inset, self.height() - th - inset)
+            tb.setGeometry(x, y, tw, th)
         self._raise_floating_widgets()
 
     def _raise_floating_widgets(self) -> None:
