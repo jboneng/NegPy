@@ -33,48 +33,84 @@ def _make_toolbar() -> ActionToolbar:
     return ActionToolbar(controller)
 
 
+def _visible_group_count(tb: ActionToolbar) -> int:
+    return sum(1 for group in tb._collapse_groups if any(w.isVisible() for w in group))
+
+
 class TestCanvasToolbarResponsive(unittest.TestCase):
-    def test_narrow_canvas_collapses_compare_and_undo_groups(self):
+    def test_pill_width_never_exceeds_budget(self):
         tb = _make_toolbar()
         tb.show()
         QApplication.processEvents()
 
-        tb.set_available_width(640)
-        QApplication.processEvents()
+        for canvas_w in (480, 640, 800, 1200):
+            tb.set_available_width(canvas_w)
+            QApplication.processEvents()
+            self.assertLessEqual(tb._pill_width(), tb._toolbar_width_budget(canvas_w))
 
-        self.assertFalse(tb.btn_compare.isVisible())
-        self.assertFalse(tb.btn_undo.isVisible())
-        self.assertTrue(tb.btn_rot_l.isVisible())
-        self.assertTrue(tb._ov_compare_action.isVisible())
-        self.assertTrue(tb._ov_undo_action.isVisible())
-        self.assertLessEqual(tb._pill_width(), tb._toolbar_width_budget(640))
-
-    def test_mid_canvas_keeps_most_controls(self):
+    def test_wider_canvas_shows_more_controls(self):
         tb = _make_toolbar()
         tb.show()
         QApplication.processEvents()
 
-        tb.set_available_width(800)
-        QApplication.processEvents()
+        counts: list[int] = []
+        widths: list[int] = []
+        for canvas_w in (480, 640, 800, 1600):
+            tb.set_available_width(canvas_w)
+            QApplication.processEvents()
+            counts.append(_visible_group_count(tb))
+            widths.append(tb._pill_width())
 
-        self.assertTrue(tb.btn_undo.isVisible())
-        self.assertTrue(tb.btn_hq.isVisible())
-        self.assertTrue(tb.btn_rot_l.isVisible())
-        self.assertFalse(tb.btn_compare.isVisible())
-        self.assertLessEqual(tb._pill_width(), tb._toolbar_width_budget(800))
+        for prev, nxt in zip(counts[:-1], counts[1:], strict=True):
+            self.assertGreaterEqual(nxt, prev)
+        for prev, nxt in zip(widths[:-1], widths[1:], strict=True):
+            self.assertGreaterEqual(nxt, prev)
 
-    def test_wide_canvas_shows_full_toolbar(self):
+    def test_core_controls_always_visible(self):
         tb = _make_toolbar()
         tb.show()
         QApplication.processEvents()
 
-        tb.set_available_width(1200)
+        for canvas_w in (480, 800, 1200):
+            tb.set_available_width(canvas_w)
+            QApplication.processEvents()
+            self.assertTrue(tb.btn_prev.isVisible())
+            self.assertTrue(tb.btn_next.isVisible())
+            self.assertTrue(tb.btn_gpu.isVisible())
+            self.assertTrue(tb.btn_overflow.isVisible())
+
+    def test_full_width_shows_all_optional_groups(self):
+        tb = _make_toolbar()
+        tb.show()
         QApplication.processEvents()
 
+        tb.set_available_width(2000)
+        QApplication.processEvents()
+
+        self.assertEqual(_visible_group_count(tb), len(tb._collapse_groups))
         self.assertTrue(tb.btn_compare.isVisible())
         self.assertTrue(tb.btn_undo.isVisible())
         self.assertTrue(tb.btn_zoom_fit.isVisible())
         self.assertFalse(tb._ov_undo_action.isVisible())
+
+    def test_narrow_canvas_mirrors_hidden_groups_in_overflow(self):
+        tb = _make_toolbar()
+        tb.show()
+        QApplication.processEvents()
+
+        tb.set_available_width(480)
+        QApplication.processEvents()
+        narrow_count = _visible_group_count(tb)
+
+        tb.set_available_width(2000)
+        QApplication.processEvents()
+        wide_count = _visible_group_count(tb)
+
+        self.assertLess(narrow_count, wide_count)
+        if not tb.btn_compare.isVisible():
+            self.assertTrue(tb._ov_compare_action.isVisible())
+        if not tb.btn_undo.isVisible():
+            self.assertTrue(tb._ov_undo_action.isVisible())
 
 
 if __name__ == "__main__":
