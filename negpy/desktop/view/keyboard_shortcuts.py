@@ -95,6 +95,7 @@ class ShortcutManager:
             "cancel_tool": lambda: _context_cancel(controller, self.window),
             "toggle_left_panel": self.window.toggle_session_dock,
             "toggle_right_panel": self.window.toggle_controls_dock,
+            "reset_panel_layout": self.window.reset_panel_layout,
             "tab_setup": lambda: right.show_tab_by_key("setup"),
             "tab_geometry": lambda: right.show_tab_by_key("geometry"),
             "tab_tone": lambda: right.show_tab_by_key("tone"),

@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 
 from negpy.desktop.controller import AppController
 from negpy.desktop.view.keyboard_shortcuts import _context_undo
-from negpy.desktop.view.shortcut_registry import tooltip_with_shortcut
+from negpy.desktop.view.shortcut_registry import key_for, tooltip_with_shortcut
 from negpy.desktop.view.styles.templates import swatch_qss
 from negpy.desktop.view.styles.theme import THEME
 from negpy.infrastructure.gpu.device import GPUDevice
@@ -252,6 +252,15 @@ class ActionToolbar(QWidget):
             act.triggered.connect(lambda _checked=False, v=val, p=pct: self._on_ui_scale_selected(v, p))
         overflow_menu.addSeparator()
 
+        reset_key = key_for("reset_panel_layout")
+        reset_label = "Reset Panel Layout" + (f"  {reset_key}" if reset_key else "")
+        overflow_menu.addAction(
+            qta.icon("fa5s.thumbtack", color=icon_color),
+            reset_label,
+            self._reset_panel_layout,
+        )
+        overflow_menu.addSeparator()
+
         overflow_menu.addAction(qta.icon("fa5s.map-signs", color=icon_color), "Take the tour", self._show_tour)
         overflow_menu.addAction(qta.icon("fa5s.keyboard", color=icon_color), "Keyboard Shortcuts  ?", self._show_shortcuts)
         self.btn_overflow.setMenu(overflow_menu)
@@ -476,6 +485,13 @@ class ActionToolbar(QWidget):
             new_config = replace(new_config, process=replace(config.process, analysis_rect=new_rect))
         self.session.update_config(new_config, persist=True)
         self.controller.request_render()
+
+    def _reset_panel_layout(self) -> None:
+        from negpy.desktop.view.main_window import MainWindow
+
+        win = self.window()
+        if isinstance(win, MainWindow):
+            win.reset_panel_layout()
 
     def _show_tour(self) -> None:
         from negpy.desktop.view.main_window import MainWindow
