@@ -41,6 +41,7 @@ from negpy.domain.models import (
     ExportPresetOutputMode,
     ExportResolutionMode,
     WorkspaceConfig,
+    canonical_crop_ratio,
     export_blocked,
     flat_export_config,
     flat_master_config,
@@ -54,7 +55,7 @@ from negpy.features.exposure.logic import (
 )
 from negpy.features.exposure.models import ExposureConfig
 from negpy.features.finish.models import FinishConfig
-from negpy.features.geometry.logic import apply_fine_rotation, detect_closest_aspect_ratio
+from negpy.features.geometry.logic import apply_fine_rotation, detect_closest_aspect_ratio, enforce_roi_aspect_ratio
 from negpy.features.geometry.models import FINE_ROTATION_LIMIT, AutocropMode
 from negpy.features.lab.models import LabConfig
 from negpy.features.local.models import LocalAdjustmentsConfig
@@ -1082,6 +1083,45 @@ class AppController(QObject):
         if self.state.active_tool == ToolMode.CROP_MANUAL:
             self.set_active_tool(ToolMode.NONE)
 
+    def set_crop_ratio(self, ratio: str) -> None:
+        """Sets the sidebar Ratio picker's target ratio. If a manual crop box is
+        already drawn, reshapes it to the new ratio in place — same center, shrunk
+        to fit within its current footprint (enforce_roi_aspect_ratio, the same
+        centered-reshape auto-crop uses) — instead of leaving the box visually
+        stale until the user redrags it.
+
+        Deliberately does NOT invalidate the metering bounds, unlike the other crop
+        entry points. Those clear them because the crop decides whether the film
+        rebate is inside the metered region (resolve_analysis_region meters within
+        context.active_roi), and letting clear base into the meter wrecks the
+        bounds. A ratio change can't do that: both this reshape and autocrop's
+        _enforce_ratio_by_occupancy only ever shrink the box inside a footprint
+        that already excludes the rebate, so the new ROI is a subset of the old
+        one. Re-metering there can only drift the per-channel floors/ceils — i.e.
+        a visible colour shift from what is supposed to be a pure reframe."""
+        geom = self.state.config.geometry
+        if ratio == geom.autocrop_ratio:
+            return
+        new_geo = replace(geom, autocrop_ratio=ratio)
+
+        rect = geom.manual_crop_rect
+        img = self.state.preview_raw
+        if rect is not None and img is not None:
+            h, w = img.shape[:2]
+            if geom.rotation in (1, 3):
+                h, w = w, h
+            nx1, ny1, nx2, ny2 = rect
+            roi_px = (round(ny1 * h), round(ny2 * h), round(nx1 * w), round(nx2 * w))
+            y1, y2, x1, x2 = enforce_roi_aspect_ratio(roi_px, h, w, ratio)
+            new_geo = replace(new_geo, manual_crop_rect=(x1 / w, y1 / h, x2 / w, y2 / h))
+
+        self.session.update_config(replace(self.state.config, geometry=new_geo), persist=True)
+        # Same spinner/overlay treatment as reset_crop/apply_auto_crop: the base
+        # stage still re-runs (geometry is part of its cache key), which can take a
+        # noticeable moment on a large HQ frame.
+        self.loading_started.emit()
+        self.request_render()
+
     def handle_analysis_rect_changed(self, nx1: float, ny1: float, nx2: float, ny2: float, persist: bool) -> None:
         """Live-update (persist=False) or commit (persist=True) the freehand analysis
         region while the tool is open. Setting a region re-meters the frame, so a commit
@@ -1309,7 +1349,11 @@ class AppController(QObject):
         if geom.fine_rotation != 0.0:
             transformed = apply_fine_rotation(transformed, geom.fine_rotation)
 
-        new_ratio = detect_closest_aspect_ratio(transformed, fallback=geom.autocrop_ratio)
+        # Detection can match a portrait-oriented frame to a portrait-only AspectRatio
+        # (e.g. "2:3") that the ratio picker doesn't display — canonicalize so the
+        # stored ratio always matches an entry the picker can show (see
+        # domain.models.CROP_RATIO_CHOICES; the crop tool auto-orients regardless).
+        new_ratio = canonical_crop_ratio(detect_closest_aspect_ratio(transformed, fallback=geom.autocrop_ratio))
         if new_ratio == geom.autocrop_ratio:
             return
 
