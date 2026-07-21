@@ -22,7 +22,7 @@ def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
 
 
 @lru_cache(maxsize=8)
-def _load_font(size: int) -> ImageFont.FreeTypeFont:
+def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     """Anti-aliased TrueType, trying common faces before PIL's default."""
     for name in ("DejaVuSans.ttf", "arial.ttf", "Arial.ttf", "Helvetica.ttc"):
         try:
@@ -179,7 +179,9 @@ class ContactSheetService:
             draw.text((x, y), display, font=font, fill=fg, anchor="lm")
 
     @staticmethod
-    def _truncate(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
+    def _truncate(
+        draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, max_w: int
+    ) -> str:
         if draw.textlength(text, font=font) <= max_w:
             return text
         ellipsis = "..."
