@@ -3,7 +3,7 @@ import colorsys
 import numpy as np
 from PyQt6.QtCore import QPointF, Qt, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QImage, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap
-from PyQt6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QDialog, QHBoxLayout, QPushButton, QVBoxLayout, QWidget
 
 from negpy.desktop.view.styles.theme import THEME
 
