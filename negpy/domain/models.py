@@ -484,6 +484,7 @@ class WorkspaceConfig:
             ExposureConfig,
             FlatFieldConfig,
             RgbScanConfig,
+            StitchConfig,
             GeometryConfig,
             LabConfig,
             RetouchConfig,
