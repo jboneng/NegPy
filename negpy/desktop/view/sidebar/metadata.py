@@ -488,7 +488,7 @@ class MetadataSidebar(BaseSidebar):
             self.push_pull_combo.setCurrentIndex(idx)
             self.scanning_edit.setText(conf.scanning)
             self.sync_check.setChecked(conf.sync_to_batch)
-            self._description_fields = conf.description_fields
+            self._description_fields = conf.description_fields or DEFAULT_DESCRIPTION_FIELDS
 
             if conf.exposure_override:
                 self._set_exif_text_quiet("exposure", conf.exposure_override)
@@ -531,6 +531,33 @@ class MetadataSidebar(BaseSidebar):
         else:
             self._set_exif_text_quiet("exposure", "")
 
+    def _preview_metadata_config(self):
+        """MetadataConfig from the live form so preview tracks edits before debounce persist."""
+        conf = self.state.config.metadata
+        fmt = self.format_combo.currentText()
+        pp_idx = self.push_pull_combo.currentIndex()
+        exposure_override = ""
+        if not self._exif_locked.get("exposure", True):
+            exposure_override = self.exposure_edit.text().strip()
+        else:
+            exposure_override = conf.exposure_override
+
+        return replace(
+            conf,
+            gear_preset_id=self.preset_combo.selected_id(),
+            camera_id=self.camera_combo.selected_id(),
+            lens_id=self.lens_combo.selected_id(),
+            film_stock_id=self.film_stock_combo.selected_id(),
+            format=fmt,
+            format_other=self.format_other_edit.text().strip() if fmt == "Other" else "",
+            developer=self.developer_edit.text().strip(),
+            push_pull=PUSH_PULL_VALUES[pp_idx] if 0 <= pp_idx < len(PUSH_PULL_VALUES) else 0,
+            scanning=self.scanning_edit.text().strip(),
+            sync_to_batch=self.sync_check.isChecked(),
+            exposure_override=exposure_override,
+            description_fields=self._description_fields,
+        )
+
     def _update_preview(self) -> None:
         while self.preview_rows.count():
             item = self.preview_rows.takeAt(0)
@@ -549,7 +576,7 @@ class MetadataSidebar(BaseSidebar):
         if current_hash and current_hash in self.state.source_exif:
             source_exif = self.state.source_exif[current_hash]
 
-        payload = build_metadata_payload(conf, self._gear_library, source_exif)
+        payload = build_metadata_payload(self._preview_metadata_config(), self._gear_library, source_exif)
         sections = payload.to_preview_sections()
 
         self.preview_empty.setText("Select gear or enter process metadata to see a preview.")
