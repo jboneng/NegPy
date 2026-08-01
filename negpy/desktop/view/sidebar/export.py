@@ -75,6 +75,8 @@ class ExportSidebar(BaseSidebar):
         self._refresh_export_enabled()
 
     def _connect_signals(self) -> None:
+        self.controller.flush_export_settings = self._flush_export_settings
+
         self.form.changed.connect(self.update_timer.start)
         self.form.changed.connect(self._refresh_proof_mismatch_warning)
         self.form.changed.connect(self._refresh_export_enabled)
@@ -757,7 +759,13 @@ class ExportSidebar(BaseSidebar):
         if persist:
             self.controller.session.repo.save_global_setting("export_scope", key)
 
+    def _flush_export_settings(self) -> None:
+        """Stop the debounce timer and write the form into state immediately."""
+        self.update_timer.stop()
+        self._persist_all_export_settings()
+
     def _on_export_clicked(self) -> None:
+        self._flush_export_settings()
         scope = self._export_scope
         if scope == "selected":
             self.controller.request_export_selected()
@@ -778,6 +786,7 @@ class ExportSidebar(BaseSidebar):
             self.controller.session.repo.save_global_setting("preset_export_scope", key)
 
     def _on_export_presets_clicked(self) -> None:
+        self._flush_export_settings()
         scope = self._preset_scope
         if scope == "selected":
             self.controller.request_preset_export_selected()
