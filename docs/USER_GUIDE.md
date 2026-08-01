@@ -60,6 +60,12 @@ Below the toolbar: a **filter box** (substring match; toggle **`.*`** for regex)
 
 Right-clicking **empty space** in the film strip offers **Add files**, **Add folder** and **Clear all**, so those tools stay in reach part-way down a long roll instead of only at the top of the panel. Here **Clear all** always means the whole session, never just the selection.
 
+#### Stitching a frame from several shots
+
+If one negative was captured in overlapping pieces (a copy stand at higher magnification than the frame), select the pieces and right-click → **Stitch selected frames**. NegPy finds the overlap, matches brightness across the seam and replaces the parts with a single wide composite named *a+b (Stitch)*. The parts' own edits stay on file, so right-click → **Unstitch** puts them back untouched. The registration is saved with the session and replayed on the next launch, so re-opening a composite costs nothing.
+
+This works on RGB-scan frames too: turn on **RGB Scan** first so each piece is already assembled from its own R/G/B triplet, then stitch the assembled frames. Each part keeps its own three exposures — nothing is shared between parts.
+
 Narrow the panel and the toolbar buttons that no longer fit move into a **»** menu at its right edge, so the panel can be squeezed down to give the image more room without losing any tool.
 
 ### Triage (culling the roll)
@@ -78,7 +84,7 @@ The right-click menu also offers **Copy/Paste Settings** (with or without normal
 <!-- panel:analysis -->
 ## 3. Analysis readout (always visible)
 
-Pinned above the tabs, this is your feedback while printing. Drag the divider to resize it, or collapse it entirely. Everything in it describes the frame you're on and updates as you edit; nothing in it is a control. Top to bottom:
+Pinned above the tabs, this is your feedback while printing. Drag the divider to resize it, or collapse it entirely. Everything in it describes the frame you're on and updates as you edit; the zone strip is the one part you can also act through. Top to bottom:
 
 #### Photometric curve
 
@@ -112,9 +118,21 @@ A 21-step Stouffer-style grey wedge printed through your current curve, in even 
 
 Ten cells on the Adams scale, where **0 is paper black and V is 18% mid-grey**, and the last cell (IX) also absorbs paper white. The brightness of each cell is the zone's tone; how solid it looks is how much of the frame lands there. This is the fastest read of whether a frame is low-key, high-key or sitting sensibly in the middle. The end cells tint **red** when shadows are blocked up or highlights are blown. Hover a cell for its exact percentage.
 
+It is also where you place a tone: **click a cell, then click that spot on the photo** and the print is solved so the spot lands on that zone — see Zone placement below. The armed cell is outlined until you spend it; clicking it again, or Esc, cancels.
+
 #### Probe
 
 A spot densitometer. Hover the image to read the pixel: per-channel density above film base (ΔD, relative to this scan's normalization, not absolute), the displayed tone's reflection print density, and its print zone (0 = paper black, V = 18% mid-grey, X = paper white). In B&W mode the ΔD channels read the pre-conversion colour record.
+
+#### Zone placement
+
+The probe made actionable — what a darkroom enlarging analyser does. **Click a zone on the strip above, then click that spot on the photo**: the print is solved so the spot prints on the zone you asked for, and you see it straight away. Ask for a second zone the same way and click a second spot; a third spot replaces whichever pin is nearer. Each pin appears here as a row: what zone it reads now, and the **target** it was given, which the − / + buttons trim in thirds of a zone.
+
+With one pin, Print Density is solved so that tone prints on its target; with two (typically a shadow and a highlight) Print Density *and* ISO-R Grade are solved so both land. What you see until you accept is a preview — **Place zones**, or **Enter** over the photo, commits it as one undoable edit, turns off Auto Density (and Auto Grade for two pins) since a meter left on would re-move the placed tones, and closes the tool. One pin is enough to accept; you don't have to place a second. **Esc** discards instead: the armed zone first, then the pins and the preview with them, leaving the print as it was. The **✕** on a row removes just that pin — remove the last one and you are back to the committed print.
+
+Pins are handles — drag one to move it, and the zone beside it re-reads as it travels (the cursor turns into a hand over a pin you can grab). A pin keeps the zone it was asked for while it travels, and its caption reads `1 · IV⅓ → VI` — where it is now, and where you are asking it to print; the arrow disappears once the two agree. Clicking the photo without picking a zone first simply pins a reading, leaving the print alone.
+
+Asking for a zone the paper cannot reach shows an amber `→ lands …` with the closest zone the print can make — the solve pegs at the slider's end, like an analyser pegging at grade 5. Pins are proofs, not edits: Esc cancels an armed zone, then clears the pins, then puts the tool down; they also go on any other edit and when you change frames. The measured zone reads through the print curve — the same model the chart and step wedge use — so after placing, the pin reads its target by construction; later stages (Lab, toning) can still shade the final pixel the hover probe reads.
 
 #### Negative stats
 
@@ -237,7 +255,7 @@ Where the frame gets its final shape: what's inside the print, and whether it si
 Corrects uneven illumination (vignetting/falloff) from your copy-stand or scanner light, using a reference shot of the bare light source.
 
 *   **Flatfield Correction**: apply the active reference to this image (enabled once a profile exists).
-*   **Reference Profile** dropdown + **Add…** / **Delete**: pick a reference image and save it as a named profile.
+*   **Reference Profile** dropdown + **Add…** / **Delete**: pick a reference image and save it as a named profile. **Add…** reads the reference once and bakes its correction into the profile, so the original reference file can then be moved, renamed or deleted without affecting your edits — the profile is self-contained (stored in NegPy's own `flatfield` folder, like sensor and crosstalk profiles).
 *   **Distortion** (-0.25 to 0.25): radial lens-distortion correction for the rig, saved with the profile. Use the film rebate as a straight-edge reference.
 
 ---

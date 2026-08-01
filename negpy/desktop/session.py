@@ -16,6 +16,7 @@ from negpy.features.stitch.models import StitchConfig
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.infrastructure.storage.repository import StorageRepository
 from negpy.kernel.system.config import APP_CONFIG
+from negpy.services.assets.flatfield import FlatFieldProfiles
 from negpy.services.assets.sidecar import load_or_promote
 
 
@@ -28,6 +29,7 @@ class ToolMode(Enum):
     LOCAL_DRAW = auto()
     ANALYSIS_DRAW = auto()
     STRAIGHTEN = auto()
+    ZONE_PLACE = auto()
 
 
 @dataclass
@@ -104,6 +106,13 @@ class AppState:
 
     # Grain focuser: 1:1-ish loupe following the cursor; display-only, session-only.
     grain_focuser: bool = False
+
+    # Zone-placement pins (ZonePin: probed spot + target zone); session-only, dropped
+    # by any real render like the test strip. Never persisted.
+    zone_pins: List[Any] = field(default_factory=list)
+
+    # Zone picked on the strip and waiting for the canvas click that spends it.
+    zone_arm_target: Optional[float] = None
 
     # Density x grade test strip: session-only proof, dropped by any real render. The
     # mosaic is the assembled patches at preview resolution, content_rect its picture area.
@@ -359,6 +368,8 @@ def resolve_asset_stitch(params: WorkspaceConfig, asset: dict) -> WorkspaceConfi
                 stitch_transforms=tuple(tuple(float(v) for v in t) for t in asset.get("stitch_transforms") or ()),
                 stitch_canvas=(int(canvas[0]), int(canvas[1])),
                 stitch_sizes=tuple((int(s[0]), int(s[1])) for s in asset.get("stitch_sizes") or ()),
+                stitch_triplets=tuple((str(t[0]), str(t[1])) for t in asset.get("stitch_triplets") or ()),
+                stitch_align=bool(asset.get("stitch_align", True)),
             ),
         )
     return replace(params, stitch=StitchConfig())
@@ -536,13 +547,14 @@ class DesktopSessionManager(QObject):
                 metadata=replace(config.metadata, protect_original_metadata=bool(sticky_protect)),
             )
 
-        # Flat-field reference and distortion k1 are rig-global: the active profile's
+        # Flat-field profile and distortion k1 are rig-global: the active profile's
         # values always override the per-file ones. New files default to enabled when a
         # profile is active; saved files keep their toggle.
         active_ff = self.repo.get_global_setting("flatfield_active_profile")
-        ff_rec = self.repo.get_flatfield_profile(active_ff) if active_ff else None
-        ff_path, ff_k1 = ff_rec if ff_rec else ("", 0.0)
-        config = replace(config, flatfield=replace(config.flatfield, reference_path=ff_path, k1=ff_k1))
+        ff_prof = FlatFieldProfiles.get(active_ff) if active_ff else None
+        ff_id = ff_prof.id if ff_prof else ""
+        ff_k1 = ff_prof.k1 if ff_prof else 0.0
+        config = replace(config, flatfield=replace(config.flatfield, profile_id=ff_id, k1=ff_k1))
 
         # Temperature roll-locks (per region): re-aim each locked region's M/Y
         # pair at its Kelvin target, keeping the frame's own off-locus tint.
@@ -561,7 +573,7 @@ class DesktopSessionManager(QObject):
         if only_global:
             return config
 
-        config = replace(config, flatfield=replace(config.flatfield, apply=bool(ff_path)))
+        config = replace(config, flatfield=replace(config.flatfield, apply=bool(ff_id)))
 
         # Workflow settings — safe to carry across all files on a roll
         sticky_mode = self.repo.get_global_setting("last_process_mode")
@@ -1109,6 +1121,8 @@ class DesktopSessionManager(QObject):
                 "transforms": [list(t) for t in f["stitch_transforms"]],
                 "canvas": list(f["stitch_canvas"]),
                 "sizes": [list(s) for s in f["stitch_sizes"]],
+                "triplets": [list(t) for t in f.get("stitch_triplets") or ()],
+                "align": bool(f.get("stitch_align", True)),
                 "hash": f["hash"],
             }
             for f in self.state.uploaded_files
