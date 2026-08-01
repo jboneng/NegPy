@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from negpy.features.metadata.exif_read import ScanExif, extract_scan_from_exif
 from negpy.features.metadata.gear_models import GearLibrary
-from negpy.features.metadata.models import MetadataConfig, PUSH_PULL_LABELS, normalize_description_fields, DEFAULT_DESCRIPTION_FIELDS
+from negpy.features.metadata.models import MetadataConfig, PUSH_PULL_LABELS, normalize_description_fields, DEFAULT_DESCRIPTION_FIELDS, resolve_description_fields
 
 _NEGPY_SOFTWARE = "NegPy"
 NEGPY_SOFTWARE = _NEGPY_SOFTWARE
@@ -309,8 +309,9 @@ def build_metadata_payload(
         push_pull=push_pull,
     )
 
-    desc = build_image_description(draft, config.description_fields)
-    if not desc and config.film and "film" in config.description_fields:
+    desc_fields = resolve_description_fields(config.description_fields)
+    desc = build_image_description(draft, desc_fields)
+    if not desc and config.film and "film" in desc_fields:
         desc = config.film.strip()
 
     exif_flags = compute_exif_write_flags(config, draft)

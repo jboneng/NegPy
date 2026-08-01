@@ -197,7 +197,7 @@ CATALOG: list[tuple[str, tuple[SettingRow, ...]]] = [
             "Description Fields",
             "metadata",
             "description_fields",
-            fmt=lambda v: ", ".join(str(x) for x in (v[0] or ())) or "—",
+            fmt=lambda v: (", ".join(str(x) for x in v[0]) if v[0] else "—"),
         ),
     )),
     ("Export", (

@@ -557,15 +557,19 @@ class DesktopSessionManager(QObject):
                 metadata=replace(config.metadata, protect_original_metadata=bool(sticky_protect)),
             )
 
-        if not only_global:
-            sticky_desc = self.repo.get_global_setting("last_description_fields")
-            if sticky_desc is not None:
-                from negpy.features.metadata.models import normalize_description_fields
+        # Description fields: unset (None) inherits the sticky roll choice; an explicit
+        # per-frame tuple from Description… is left alone.
+        if config.metadata.description_fields is None:
+            from negpy.features.metadata.models import resolve_description_fields
 
-                config = replace(
-                    config,
-                    metadata=replace(config.metadata, description_fields=normalize_description_fields(sticky_desc)),
-                )
+            sticky_desc = self.repo.get_global_setting("last_description_fields")
+            config = replace(
+                config,
+                metadata=replace(
+                    config.metadata,
+                    description_fields=resolve_description_fields(None, sticky_desc),
+                ),
+            )
 
         # Flat-field profile and distortion k1 are rig-global: the active profile's
         # values always override the per-file ones. New files default to enabled when a
@@ -748,7 +752,16 @@ class DesktopSessionManager(QObject):
                 "last_retouch_config": asdict(config.retouch),
                 "last_dust_remove": config.retouch.dust_remove,
                 "last_protect_original_metadata": config.metadata.protect_original_metadata,
-                "last_description_fields": list(config.metadata.description_fields),
+                "last_description_fields": list(
+                    config.metadata.description_fields
+                    if config.metadata.description_fields is not None
+                    else (
+                        "camera",
+                        "lens",
+                        "film",
+                        "iso",
+                    )
+                ),
             }
         )
 

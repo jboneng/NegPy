@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 
@@ -52,6 +52,15 @@ def normalize_description_fields(fields: object) -> tuple[str, ...]:
     return tuple(k for k in DESCRIPTION_FIELD_ORDER if k in raw and k in _DESCRIPTION_FIELD_SET)
 
 
+def resolve_description_fields(fields: object, sticky: object = None) -> tuple[str, ...]:
+    """Per-frame fields if set; otherwise sticky (or gear-only defaults)."""
+    if fields is not None:
+        return normalize_description_fields(fields)
+    if sticky is not None:
+        return normalize_description_fields(sticky)
+    return DEFAULT_DESCRIPTION_FIELDS
+
+
 @dataclass(frozen=True)
 class MetadataConfig:
     """
@@ -89,10 +98,13 @@ class MetadataConfig:
 
     exposure_override: str = ""  # free-text e.g. "1/125s f/2.8 ISO 400"; empty = use source EXIF
 
-    # Which resolved fields join into EXIF ImageDescription.
-    description_fields: tuple[str, ...] = field(default_factory=lambda: DEFAULT_DESCRIPTION_FIELDS)
+    # EXIF ImageDescription field set. None = inherit sticky roll choice on open;
+    # an explicit tuple (from Description…) is per-frame and not overwritten by sticky.
+    description_fields: Optional[tuple[str, ...]] = None
 
     def __post_init__(self) -> None:
+        if self.description_fields is None:
+            return
         normalized = normalize_description_fields(self.description_fields)
         if normalized != self.description_fields:
             object.__setattr__(self, "description_fields", normalized)

@@ -431,6 +431,7 @@ def test_normalize_description_fields_orders_and_filters():
 
     assert normalize_description_fields(["iso", "camera", "nope"]) == ("camera", "iso")
     assert MetadataConfig(description_fields=["scanning", "film"]).description_fields == ("film", "scanning")
+    assert MetadataConfig().description_fields is None
 
 
 def test_build_metadata_payload_preview_pairs():
