@@ -17,10 +17,12 @@ from negpy.desktop.view.sidebar.base import BaseSidebar
 from negpy.desktop.view.styles.templates import field_label, hint_label
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
+from negpy.desktop.view.widgets.description_fields_dialog import DescriptionFieldsDialog
 from negpy.desktop.view.widgets.gear_library_dialog import GearLibraryDialog
 from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
 from negpy.features.metadata.gear_logic import metadata_from_gear
 from negpy.features.metadata.gear_models import GearLibrary
+from negpy.features.metadata.models import DEFAULT_DESCRIPTION_FIELDS
 from negpy.features.metadata.payload import build_metadata_payload
 from negpy.services.assets.gear import GearProfiles
 
@@ -50,6 +52,7 @@ class MetadataSidebar(BaseSidebar):
 
         self._dirty = False
         self._exif_locked = {"exposure": True}
+        self._description_fields: tuple[str, ...] = conf.description_fields or DEFAULT_DESCRIPTION_FIELDS
 
         self.protect_check = QCheckBox("Protect original metadata")
         self.protect_check.setChecked(conf.protect_original_metadata)
@@ -161,8 +164,15 @@ class MetadataSidebar(BaseSidebar):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(4)
 
+        preview_top = QHBoxLayout()
+        preview_top.setContentsMargins(0, 0, 0, 0)
+        preview_top.setSpacing(THEME.space_sm)
         preview_hint = hint_label("Written to exported files on export.")
-        preview_layout.addWidget(preview_hint)
+        preview_top.addWidget(preview_hint, 1)
+        self.description_fields_btn = QPushButton("Description…")
+        self.description_fields_btn.setToolTip("Choose which fields join into EXIF ImageDescription.")
+        preview_top.addWidget(self.description_fields_btn)
+        preview_layout.addLayout(preview_top)
 
         self.preview_rows = QVBoxLayout()
         self.preview_rows.setSpacing(2)
@@ -216,6 +226,7 @@ class MetadataSidebar(BaseSidebar):
 
     def _set_metadata_controls_enabled(self, enabled: bool) -> None:
         self._metadata_controls.setEnabled(enabled)
+        self.description_fields_btn.setEnabled(enabled)
 
     def _apply_lock_style(self, edit: QLineEdit, locked: bool) -> None:
         if locked:
@@ -243,6 +254,7 @@ class MetadataSidebar(BaseSidebar):
 
     def _connect_signals(self) -> None:
         self.protect_check.toggled.connect(self._on_protect_toggled)
+        self.description_fields_btn.clicked.connect(self._open_description_fields)
         self.preset_combo.selection_changed.connect(self._on_preset_changed)
         self.preset_clear_btn.clicked.connect(self._on_preset_clear)
         self.camera_combo.selection_changed.connect(self._on_gear_changed)
@@ -268,6 +280,20 @@ class MetadataSidebar(BaseSidebar):
             render=False,
             readback_metrics=False,
             protect_original_metadata=checked,
+        )
+        self._schedule_preview()
+
+    def _open_description_fields(self) -> None:
+        dlg = DescriptionFieldsDialog(self._description_fields, self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        self._description_fields = dlg.selected_fields()
+        self.update_config_section(
+            "metadata",
+            persist=True,
+            render=False,
+            readback_metrics=False,
+            description_fields=self._description_fields,
         )
         self._schedule_preview()
 
@@ -431,6 +457,7 @@ class MetadataSidebar(BaseSidebar):
             scanning=self.scanning_edit.text().strip(),
             sync_to_batch=self.sync_check.isChecked(),
             exposure_override=exposure_override,
+            description_fields=self._description_fields,
         )
 
     def sync_ui(self) -> None:
@@ -456,6 +483,7 @@ class MetadataSidebar(BaseSidebar):
             self.push_pull_combo.setCurrentIndex(idx)
             self.scanning_edit.setText(conf.scanning)
             self.sync_check.setChecked(conf.sync_to_batch)
+            self._description_fields = conf.description_fields
 
             if conf.exposure_override:
                 self._set_exif_text_quiet("exposure", conf.exposure_override)

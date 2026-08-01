@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from negpy.features.metadata.exif_read import ScanExif, extract_scan_from_exif
 from negpy.features.metadata.gear_models import GearLibrary
-from negpy.features.metadata.models import MetadataConfig, PUSH_PULL_LABELS
+from negpy.features.metadata.models import MetadataConfig, PUSH_PULL_LABELS, normalize_description_fields, DEFAULT_DESCRIPTION_FIELDS
 
 _NEGPY_SOFTWARE = "NegPy"
 NEGPY_SOFTWARE = _NEGPY_SOFTWARE
@@ -197,22 +197,35 @@ def _apex_from_f_number(f_number: float) -> float:
     return 2.0 * math.log(f_number, 2.0)
 
 
-def build_image_description(payload: MetadataPayload) -> str:
-    """Human-readable summary: camera • lens • film • ISO."""
+def build_image_description(payload: MetadataPayload, fields: object = None) -> str:
+    """Human-readable EXIF ImageDescription from the selected field set."""
+    enabled = frozenset(normalize_description_fields(fields if fields is not None else DEFAULT_DESCRIPTION_FIELDS))
     parts: list[str] = []
-    camera = payload.camera_display()
-    if camera:
-        parts.append(camera)
-    lens = payload.lens_display()
-    if lens:
-        parts.append(lens)
-    if payload.film_stock:
+    if "camera" in enabled:
+        camera = payload.camera_display()
+        if camera:
+            parts.append(camera)
+    if "lens" in enabled:
+        lens = payload.lens_display()
+        if lens:
+            parts.append(lens)
+    if "film" in enabled and payload.film_stock:
         parts.append(payload.film_stock)
-    if payload.iso is not None:
+    if "iso" in enabled and payload.iso is not None:
         parts.append(f"ISO {payload.iso}")
+    if "format" in enabled and payload.film_format:
+        parts.append(payload.film_format)
+    if "developer" in enabled and payload.developer:
+        parts.append(payload.developer)
+    if "push_pull" in enabled and payload.push_pull and payload.push_pull != "Normal":
+        parts.append(payload.push_pull)
+    if "scanning" in enabled and payload.scan_method:
+        parts.append(payload.scan_method)
     if parts:
         return " • ".join(parts)
-    return payload.film_stock or ""
+    if "film" in enabled:
+        return payload.film_stock or ""
+    return ""
 
 
 def build_metadata_payload(
@@ -296,8 +309,8 @@ def build_metadata_payload(
         push_pull=push_pull,
     )
 
-    desc = build_image_description(draft)
-    if not desc and config.film:
+    desc = build_image_description(draft, config.description_fields)
+    if not desc and config.film and "film" in config.description_fields:
         desc = config.film.strip()
 
     exif_flags = compute_exif_write_flags(config, draft)
