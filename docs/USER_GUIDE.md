@@ -507,7 +507,7 @@ Archival metadata for the **original analog capture** (camera, lens, film, proce
 **Scanning:**
 
 *   **Scanning**: scan method/notes (EXIF `Software` is always `NegPy`).
-*   **Roll / Frame**: Scanlight capture roll name and frame number. Stamped automatically on capture; editable here. Available in export filename templates as `{{ roll }}` / `{{ frame }}` (not the Roll Analysis normalization name).
+*   **Roll / Frame**: Scanlight capture roll name and frame number. Stamped automatically on capture; editable here. Available in export filename templates as `{{ roll }}` / `{{ frame }}`, and written to XMP as `negpy:CaptureRoll` / `negpy:CaptureFrame` when set (not the Roll Analysis normalization name).
 *   **Sync custom metadata to all files in batch export**: apply this tab's values to every file in a batch.
 
 **Exposure**: optional original shutter/aperture/ISO. Click the lock to edit a free-text string (e.g. `1/125s f/2.8 ISO 400`).
