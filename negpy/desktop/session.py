@@ -752,16 +752,6 @@ class DesktopSessionManager(QObject):
                 "last_retouch_config": asdict(config.retouch),
                 "last_dust_remove": config.retouch.dust_remove,
                 "last_protect_original_metadata": config.metadata.protect_original_metadata,
-                "last_description_fields": list(
-                    config.metadata.description_fields
-                    if config.metadata.description_fields is not None
-                    else (
-                        "camera",
-                        "lens",
-                        "film",
-                        "iso",
-                    )
-                ),
             }
         )
 

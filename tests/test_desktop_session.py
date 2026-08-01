@@ -247,6 +247,15 @@ class TestDesktopSessionSync(unittest.TestCase):
         config = self.session._apply_sticky_settings(base, only_global=True)
         self.assertEqual(config.metadata.description_fields, ("camera", "iso"))
 
+    def test_persist_sticky_settings_does_not_write_description_fields(self):
+        """Any metadata save must not clobber last Description… confirm."""
+        config = WorkspaceConfig(
+            metadata=replace(WorkspaceConfig().metadata, description_fields=("camera", "developer")),
+        )
+        self.session._persist_sticky_settings(config)
+        saved = self.mock_repo.save_global_settings.call_args.args[0]
+        self.assertNotIn("last_description_fields", saved)
+
     def test_processing_toggles_carry_to_new_files(self):
         # Globally remembered toggles must be applied to a fresh (sidecar-less) file.
         sticky = {
