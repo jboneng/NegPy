@@ -884,8 +884,12 @@ def constant_dark_from_columns(
             raise ValueError("each dark sample must be length-3 RGB")
         for c in range(3):
             acc[c] += int(sample[c])
-    mean = tuple(int(round(acc[c] / n)) for c in range(3))
-    return [mean] * n  # type: ignore[list-item]
+    mean: tuple[int, int, int] = (
+        int(round(acc[0] / n)),
+        int(round(acc[1] / n)),
+        int(round(acc[2] / n)),
+    )
+    return [mean] * n
 
 
 def build_measured_shading_table(
