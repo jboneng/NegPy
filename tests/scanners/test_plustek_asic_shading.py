@@ -749,3 +749,24 @@ def test_infrared_cache_miss_does_not_force_colour_calib(tmp_path: Path, monkeyp
     )
     session.run(resolution=geometry.resolution, mode="infrared", geometry=geometry)
     assert order == ["acquire"]
+
+
+def test_host_calib_exposure_makeup_lifts_dim_film_window():
+    """Home-chrome stretch leaves film-window peaks low — makeup to near white."""
+    from negpy.infrastructure.scanners.plustek.scan.pipeline import (
+        HOST_CALIB_PEAK_TARGET,
+        ImagePipeline,
+    )
+
+    pipe = ImagePipeline(MODEL_8200I_SE)
+    w = 32
+    # Raw: dark~1000, mid film~8000, bright film~16000; home white~50000.
+    rgb = np.full((16, w, 3), 8000, dtype=np.uint16)
+    rgb[:, w // 4 : 3 * w // 4, :] = 16000
+    dark = np.full((w, 3), 1000, dtype=np.uint16)
+    white = np.full((w, 3), 50000, dtype=np.uint16)
+    out = pipe.apply_host_calib(rgb, dark=dark, white=white)
+    peak = float(np.percentile(out, 99.7))
+    assert peak >= HOST_CALIB_PEAK_TARGET * 0.95
+    # Midtones must lift with the peak (not only clip edges).
+    assert float(np.median(out)) > 20000

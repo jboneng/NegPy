@@ -12,6 +12,13 @@ from negpy.infrastructure.scanners.plustek.scan.geometry import ScanGeometry
 
 logger = get_logger(__name__)
 
+#: After dark/white stretch, push frame highlights toward sensor white when the
+#: home-chrome white reference is brighter than anything in the film window.
+#: NegPy metering expects film base near full scale on a negative scan.
+HOST_CALIB_PEAK_PERCENTILE = 99.7
+HOST_CALIB_PEAK_TARGET = 0xF000
+HOST_CALIB_PEAK_TRIGGER = 0.85
+
 
 class ImagePipeline:
     """Convert raw scanner bytes into HxWx3 uint16 RGB."""
@@ -161,10 +168,15 @@ class ImagePipeline:
         *,
         dark: np.ndarray,
         white: np.ndarray,
+        peak_target: int = HOST_CALIB_PEAK_TARGET,
+        peak_percentile: float = HOST_CALIB_PEAK_PERCENTILE,
     ) -> np.ndarray:
-        """Host-side shading: stretch dark→white to full 16-bit range.
+        """Host-side shading: column flat-field, then expose film base near white.
 
-        ``dark`` / ``white`` are (pixels, 3) uint16 column averages.
+        ``dark`` / ``white`` are (pixels, 3) uint16 column averages from the home
+        chrome strip. Mapping that strip to 65535 leaves the film window dark when
+        scan-position light is lower than home — NegPy then meters a thin-looking
+        positive. A percentile makeup brings frame highlights up to ``peak_target``.
         """
         if dark.shape != white.shape:
             raise ValueError(f"dark/white shape mismatch: {dark.shape} vs {white.shape}")
@@ -186,12 +198,28 @@ class ImagePipeline:
 
         img = rgb.astype(np.float32) / 65535.0
         out = (img - offset) * mult
-        out = np.clip(np.rint(out * 65535.0), 0, 65535).astype(np.uint16)
+        out = np.clip(out * 65535.0, 0, 65535)
         if bad.any():
             # Leave original where calib is invalid
             mask = np.broadcast_to(bad, rgb.shape)
-            out = np.where(mask, rgb, out)
-        return out
+            out = np.where(mask, rgb.astype(np.float32), out)
+
+        target = int(peak_target)
+        if target > 0:
+            peak = float(np.percentile(out, float(peak_percentile)))
+            trigger = float(target) * float(HOST_CALIB_PEAK_TRIGGER)
+            if peak > 1.0 and peak < trigger:
+                gain = float(target) / peak
+                out = np.clip(out * gain, 0, 65535)
+                logger.info(
+                    "host calib exposure makeup gain=%.3f peak_p%.1f=%.0f → %d",
+                    gain,
+                    float(peak_percentile),
+                    peak,
+                    target,
+                )
+
+        return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
 
     def assemble(
         self,
