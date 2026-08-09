@@ -607,12 +607,17 @@ def test_apply_stationary_scan_regs_writes_capture_mode_block():
 
 def test_shading_strip_setup_sets_dvdset_when_requested():
     from negpy.infrastructure.scanners.plustek.asic.gl128 import Gl128
+    from negpy.infrastructure.scanners.plustek.asic.registers import Gl128Registers
 
+    r = Gl128Registers()
     proto = MagicMock()
     proto.write_u24 = MagicMock()
     proto.write_u16 = MagicMock()
     proto.read_register = MagicMock(side_effect=lambda addr: {
         0x01: 0x22,
+        0x02: 0x10,
+        0x04: 0x42,
+        0x05: 0x40,
         0x2B: 0x02,
         0xA5: 0x02,
         0xAB: 0x02,
@@ -623,6 +628,9 @@ def test_shading_strip_setup_sets_dvdset_when_requested():
         pixels=100, lines=128, resolution=1800, dvdset=True
     )
     assert asic._reg_cache[0x01] & 0x20  # DVDSET
+    # SF white uses MTRPWR; AGOHOME is OR'd so SCAN-clear parks after travel.
+    assert asic._reg_cache[r.REG_0x02] & r.MTRPWR
+    assert asic._reg_cache[r.REG_0x02] & r.AGOHOME
     assert asic._reg_cache[0x2B] == MODEL_8200I_SE.dummy_by_dpi[1800]
     assert asic._reg_cache[0xA5] == MODEL_8200I_SE.pixel_clock_by_dpi[1800]
     assert asic._reg_cache[0xAB] == MODEL_8200I_SE.pixel_clock_by_dpi[1800]
@@ -630,6 +638,94 @@ def test_shading_strip_setup_sets_dvdset_when_requested():
         pixels=100, lines=128, resolution=1800, dvdset=False
     )
     assert not (asic._reg_cache[0x01] & 0x20)
+    assert asic._reg_cache[r.REG_0x02] == 0x00
+    dark_dummy, dark_a, dark_b = MODEL_8200I_SE.shading_strip_clocks(1800, dvdset=False)
+    assert asic._reg_cache[0x2B] == dark_dummy
+    assert asic._reg_cache[0xA5] == dark_a
+    assert asic._reg_cache[0xAB] == dark_b
+
+
+def test_capture_lperiod_matches_session_03_04():
+    assert MODEL_8200I_SE.line_period_for(1200) == 11283
+    assert MODEL_8200I_SE.line_period_for(1800) == 11470
+
+
+def test_upload_tables_slope_false_skips_slope_ahb():
+    from negpy.infrastructure.scanners.plustek.asic.gl128 import Gl128
+    from negpy.infrastructure.scanners.plustek.asic.registers import Gl128Registers
+
+    r = Gl128Registers()
+    proto = MagicMock()
+    proto.write_ahb = MagicMock()
+    asic = Gl128(proto, MODEL_8200I_SE)
+    asic.upload_tables(resolution=1800, shading=False, slope=False)
+    addrs = [int(c.args[0]) for c in proto.write_ahb.call_args_list]
+    assert r.AHB_SLOPE_SCAN not in addrs
+    assert r.AHB_SLOPE_FAST not in addrs
+    assert r.AHB_CHANNEL_R in addrs
+    assert r.AHB_CHANNEL_G in addrs
+    assert r.AHB_CHANNEL_B in addrs
+
+
+def test_run_asic_shading_calls_exposure_only_after_unity(monkeypatch):
+    """Unity→white window must not push slow slope (session 03/04)."""
+    import negpy.infrastructure.scanners.plustek.asic.gl128 as gl128_mod
+    from negpy.infrastructure.scanners.plustek.asic.gl128 import Gl128
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import AfeFrontend
+
+    monkeypatch.setattr(gl128_mod.time, "sleep", lambda *_a, **_k: None)
+
+    proto = MagicMock()
+    asic = Gl128(proto, MODEL_8200I_SE)
+    asic._initialized = True
+    asic._motor_moves_enabled = False
+    asic.last_afe = AfeFrontend(offsets=(19, 16, 18), gains=(16, 16, 16))
+    asic.apply_frontend = MagicMock()
+    asic._require_carriage_at_home = MagicMock()
+    asic.lamp_off = MagicMock()
+    asic.lamp_on = MagicMock()
+    asic._reassert_lamp_off = MagicMock()
+    asic._log_lamp_off_state = MagicMock()
+    asic._log_lamp_state = MagicMock()
+    asic._await_colour_optical_dark = MagicMock()
+    asic.upload_shading_table = MagicMock()
+    n = 8
+    strip = b"\x00\x04" * (n * 128 * 3)
+    white = b"\x00\xd0" * (n * 128 * 3)
+    asic.acquire_shading_strip = MagicMock(side_effect=[strip, white])
+    calls: list[dict] = []
+
+    def _upload(*, resolution: int, shading: bool = False, slope: bool = True):
+        calls.append({"resolution": resolution, "shading": shading, "slope": slope})
+
+    asic.upload_tables = MagicMock(side_effect=_upload)
+    monkeypatch.setattr(
+        gl128_mod,
+        "validate_color_shading_table",
+        lambda *_a, **_k: (False, "white mean hot"),
+    )
+    monkeypatch.setattr(
+        gl128_mod,
+        "average_rgb16_columns",
+        MagicMock(
+            side_effect=[
+                [(900, 970, 990)] * n,
+                [(50000, 52000, 51000)] * n,
+            ]
+        ),
+    )
+    monkeypatch.setattr(gl128_mod, "host_unity_preview_mean", lambda *_a, **_k: 13500.0)
+    monkeypatch.setattr(
+        gl128_mod,
+        "shading_columns_mean",
+        lambda cols: float(sum(sum(c) for c in cols) / max(1, len(cols) * 3)),
+    )
+
+    asic.run_asic_shading(
+        resolution=1800, strpixel=240, endpixel=240 + n * 4, dpiset=300
+    )
+    assert calls, "expected upload_tables after unity"
+    assert calls[0]["slope"] is False
 
 
 def test_host_unity_preview_mean_matches_sf_band():

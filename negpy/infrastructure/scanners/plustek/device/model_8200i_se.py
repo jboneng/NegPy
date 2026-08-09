@@ -153,19 +153,35 @@ _OUTPUT_PIXEL_OFFSET_SE: dict[int, int] = {
     7200: 120,
 }
 
-#: Line period written to ``0x28`` (24-bit BE). Session ``13_ppi_ladder``.
+#: Line period written to ``0x28`` (24-bit BE).
+#: 1200/1800 from shading sessions 03/04; other PPIs from session ``13_ppi_ladder``.
 _LPERIOD_BY_DPI: dict[int, int] = {
     150: 11064,
     300: 11064,
     600: 11064,
     720: 11106,
     900: 11170,
-    1200: 11277,
+    1200: 11283,  # session 03 white measure
     1440: 11362,
-    1800: 11490,
+    1800: 11470,  # session 04 white measure
     2400: 11703,
     3600: 13407,
     7200: 15963,
+}
+
+#: Dark shading strip ``0x2B`` / ``0xA5`` / ``0xAB`` (session 03/04; DVDSET off).
+#: White strip uses :data:`_DUMMY_BY_DPI` / :data:`_PIXEL_CLOCK_BY_DPI` instead.
+_SHADING_DARK_DUMMY_BY_DPI: dict[int, int] = {
+    1200: 0x04,
+    1800: 0x06,
+}
+_SHADING_DARK_PIXEL_CLOCK_A_BY_DPI: dict[int, int] = {
+    1200: 0x01,
+    1800: 0x01,
+}
+_SHADING_DARK_PIXEL_CLOCK_B_BY_DPI: dict[int, int] = {
+    1200: 0x30,
+    1800: 0x30,
 }
 
 #: ``0xA5``/``0xAB`` and ``0x2B`` — replayed verbatim from session 13.
@@ -329,6 +345,15 @@ class Model8200iSE:
         default_factory=lambda: dict(_PIXEL_CLOCK_BY_DPI)
     )
     dummy_by_dpi: Mapping[int, int] = field(default_factory=lambda: dict(_DUMMY_BY_DPI))
+    shading_dark_dummy_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(_SHADING_DARK_DUMMY_BY_DPI)
+    )
+    shading_dark_pixel_clock_a_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(_SHADING_DARK_PIXEL_CLOCK_A_BY_DPI)
+    )
+    shading_dark_pixel_clock_b_by_dpi: Mapping[int, int] = field(
+        default_factory=lambda: dict(_SHADING_DARK_PIXEL_CLOCK_B_BY_DPI)
+    )
 
     register_dpihw: int = 1200
     exposure_lperiod: int = 14000
@@ -435,6 +460,23 @@ class Model8200iSE:
         """Value for ``LPERIOD`` (``0x28``) at ``resolution``."""
         key = self.asic_dpi_for(resolution)
         return self.lperiod_by_dpi.get(key, self.exposure_lperiod)
+
+    def shading_strip_clocks(self, resolution: int, *, dvdset: bool) -> tuple[int, int, int]:
+        """``(0x2B, 0xA5, 0xAB)`` for a shading strip.
+
+        White (DVDSET on) uses the image-dpi tables. Dark (DVDSET off) uses the
+        session 03/04 dark-strip clocks when known; otherwise image-dpi.
+        """
+        key = self.asic_dpi_for(resolution)
+        if not dvdset:
+            dummy_map = self.shading_dark_dummy_by_dpi
+            clk_a_map = self.shading_dark_pixel_clock_a_by_dpi
+            clk_b_map = self.shading_dark_pixel_clock_b_by_dpi
+            if key in dummy_map and key in clk_a_map and key in clk_b_map:
+                return int(dummy_map[key]), int(clk_a_map[key]), int(clk_b_map[key])
+        dummy = int(self.dummy_by_dpi.get(key, 0x02))
+        clk = int(self.pixel_clock_by_dpi.get(key, 0x02))
+        return dummy, clk, clk
 
     def channel_exposure_for(self, resolution: int) -> int:
         """Per-channel RAM exposure, ``14000 / oversample`` in the captures."""

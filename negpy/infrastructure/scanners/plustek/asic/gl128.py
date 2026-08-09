@@ -611,7 +611,7 @@ class Gl128:
         dpiset: int | None = None,
         dvdset: bool = False,
     ) -> None:
-        """Stationary multi-line shading geometry (image window, motor off)."""
+        """Multi-line shading geometry (image window; motor policy per DVDSET)."""
         r = self.registers
         self._apply_stationary_scan_regs()
         start, end, dpi_calib = self._shading_window(
@@ -621,17 +621,23 @@ class Gl128:
             endpixel=endpixel,
             dpiset=dpiset,
         )
-        asic_dpi = self.model.asic_dpi_for(int(resolution))
-        dummy = getattr(self.model, "dummy_by_dpi", None)
-        clock = getattr(self.model, "pixel_clock_by_dpi", None)
-        # Session 03 white blast: 0x2B/0xA5/0xAB match image dpi tables.
-        # Boot leaves 0x2B=0x20 / 0xA5=0x20 / 0xAB=0x30 — DVDSET then skips reshape.
-        if dummy is not None and asic_dpi in dummy:
-            self._write(0x2B, int(dummy[asic_dpi]))
-        if clock is not None and asic_dpi in clock:
-            clk = int(clock[asic_dpi])
-            self._write(0xA5, clk)
-            self._write(0xAB, clk)
+        clocks = getattr(self.model, "shading_strip_clocks", None)
+        if callable(clocks):
+            dummy, clk_a, clk_b = clocks(int(resolution), dvdset=dvdset)
+            self._write(0x2B, int(dummy))
+            self._write(0xA5, int(clk_a))
+            self._write(0xAB, int(clk_b))
+        else:
+            # Non-SE models: image-dpi clocks for both strips.
+            asic_dpi = self.model.asic_dpi_for(int(resolution))
+            dummy_map = getattr(self.model, "dummy_by_dpi", None)
+            clock_map = getattr(self.model, "pixel_clock_by_dpi", None)
+            if dummy_map is not None and asic_dpi in dummy_map:
+                self._write(0x2B, int(dummy_map[asic_dpi]))
+            if clock_map is not None and asic_dpi in clock_map:
+                clk = int(clock_map[asic_dpi])
+                self._write(0xA5, clk)
+                self._write(0xAB, clk)
         self.protocol.write_u24(r.REG_LINCNT, int(lines))
         self.protocol.write_u16(r.REG_DPISET, dpi_calib)
         self.protocol.write_u24(r.REG_STRPIXEL, start)
@@ -643,10 +649,13 @@ class Gl128:
         self.protocol.write_u24(r.REG_EXPOSURE, int(self.model.exposure_lperiod))
         self._write(r.REG_DEPTH_A, r.DEPTH16_A)
         self._write(r.REG_DEPTH_B, r.DEPTH16_B)
-        # Stationary only: clear MTRPWR/AGOHOME/FASTFED. With motor armed in
-        # Lab, any residual 0x02 bits + SCAN+LINCNT will advance the carriage
-        # and can grind the window end.
-        self._write(r.REG_0x02, 0x00)
+        # Colour white (DVDSET): SF uses MTRPWR (0x10). SCAN+LINCNT advances the
+        # head here, so OR AGOHOME (image-pass park bit) — clearing SCAN then
+        # returns home (MOTOR.md). Dark / IR white: motor off.
+        if dvdset:
+            self._write(r.REG_0x02, r.MTRPWR | r.AGOHOME)
+        else:
+            self._write(r.REG_0x02, 0x00)
         # Dark: SHDAREA only. White after unity upload: SHDAREA|DVDSET (0x22/0x23).
         reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA) & ~r.SCAN
         if dvdset:
@@ -656,13 +665,20 @@ class Gl128:
         self._write(r.REG_0x01, reg01)
         if dvdset:
             rb01 = int(self.protocol.read_register(r.REG_0x01)) & 0xFF
+            rb02 = int(self.protocol.read_register(r.REG_0x02)) & 0xFF
+            rb04 = int(self.protocol.read_register(0x04)) & 0xFF
+            rb05 = int(self.protocol.read_register(0x05)) & 0xFF
             rb2b = int(self.protocol.read_register(0x2B)) & 0xFF
             rb_a5 = int(self.protocol.read_register(0xA5)) & 0xFF
             rb_ab = int(self.protocol.read_register(0xAB)) & 0xFF
             logger.info(
                 "GL128 shading strip DVDSET setup readback "
-                "0x01=%#04x 0x2B=%#04x 0xA5=%#04x 0xAB=%#04x",
+                "0x01=%#04x 0x02=%#04x 0x04=%#04x 0x05=%#04x "
+                "0x2B=%#04x 0xA5=%#04x 0xAB=%#04x",
                 rb01,
+                rb02,
+                rb04,
+                rb05,
                 rb2b,
                 rb_a5,
                 rb_ab,
@@ -702,8 +718,11 @@ class Gl128:
             dpiset=dpiset,
             dvdset=dvdset,
         )
-        # Re-assert motor off immediately before START (cache/hardware drift).
-        self._write(r.REG_0x02, 0x00)
+        # Re-assert motor policy immediately before START (cache/hardware drift).
+        if dvdset:
+            self._write(r.REG_0x02, r.MTRPWR | r.AGOHOME)
+        else:
+            self._write(r.REG_0x02, 0x00)
         self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
         # Absolute SCAN write — RMW can drop DVDSET if a stale 0x01 read races.
         reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA | r.SCAN)
@@ -714,9 +733,16 @@ class Gl128:
         self._write(r.REG_0x01, reg01)
         if dvdset:
             logger.info(
-                "GL128 shading strip START 0x01=%#04x (want %#04x)",
+                "GL128 shading strip START "
+                "0x01=%#04x 0x02=%#04x LPERIOD=%d DEPTH=%#04x/%#04x "
+                "(want 0x01=%#04x 0x02=%#04x)",
                 int(self.protocol.read_register(r.REG_0x01)) & 0xFF,
+                int(self.protocol.read_register(r.REG_0x02)) & 0xFF,
+                int(self.model.line_period_for(int(resolution))),
+                int(self._reg_cache.get(r.REG_DEPTH_A, 0)) & 0xFF,
+                int(self._reg_cache.get(r.REG_DEPTH_B, 0)) & 0xFF,
                 reg01 & 0xFF,
+                (r.MTRPWR | r.AGOHOME) & 0xFF,
             )
         self._write(r.REG_START, r.START_GO)
 
@@ -724,6 +750,8 @@ class Gl128:
             self._wait_stationary_data_ready(timeout_s, where="Shading strip")
         except ScanError:
             self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
+            if dvdset:
+                self._write(r.REG_0x02, 0x00)
             raise
 
         self.protocol.bulk_read_begin(size, index=r.BULK_INDEX_RAM, addr=r.AHB_CHANNEL_R)
@@ -733,7 +761,18 @@ class Gl128:
             if not chunk:
                 break
             buf.extend(chunk)
+        # Clear SCAN first so AGOHOME (colour white) can park, then drop motor.
         self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
+        if dvdset:
+            try:
+                self.wait_until_at_home(timeout_s=30.0)
+                logger.info("GL128 shading white strip parked at home after AGOHOME")
+            except MotorTimeoutError as exc:
+                self._write(r.REG_0x02, 0x00)
+                raise ScanError(
+                    "Shading white strip: AGOHOME did not return the carriage home. "
+                    "Park with SilverFast or power-cycle, then retry."
+                ) from exc
         self._write(r.REG_0x02, 0x00)
         if len(buf) < size:
             raise ScanError(f"Shading strip short read: {len(buf)} of {size} bytes")
@@ -748,10 +787,14 @@ class Gl128:
         endpixel: int | None = None,
         dpiset: int | None = None,
     ) -> bytes:
-        """Dark→unity upload→white→measured upload (stationary; motor off).
+        """Dark→unity upload→white→measured upload (at home; feeds disarmed).
 
         Returns the final measured shading blob. Sets ``asic_shading_ready``.
         Image scans keep ``DVDSET`` when ready so the ASIC applies this table.
+
+        Colour white strip: SF ``MTRPWR`` plus ``AGOHOME`` so SCAN-clear parks
+        (live MTRPWR alone advances the head). Exposure AHB only after unity;
+        dark/white use capture clocks.
 
         Pass ``method=\"infrared\"`` so the white strip runs under the IR LED
         (session 05: IR table uses zero dark terms + near-equal whites).
@@ -815,8 +858,8 @@ class Gl128:
         if self.last_afe is not None:
             self.apply_frontend(self.last_afe)
 
-        # SF: lamp off → ~0.5s → dark (exposure still init remnant) → unity →
-        # upload shading slope/exposure → lamp on → white.
+        # SF: lamp off → ~0.5s → dark → unity → exposure AHB (no slope here) →
+        # lamp on → white with DVDSET|MTRPWR (we also arm AGOHOME to park).
         settle_s = IR_SHADING_DARK_SETTLE_S if infrared else COLOR_SHADING_DARK_SETTLE_S
         self.lamp_off()
         self._reassert_lamp_off()
@@ -854,8 +897,8 @@ class Gl128:
         unity = make_unity_white_table(dark, declared_size=declared)
         self.upload_shading_table(unity)
 
-        # Capture: exposure (512 B/ch) after unity / before white; slow slope too.
-        self.upload_tables(resolution=resolution, shading=True)
+        # Session 03/04: exposure tables only between unity and white (no slope).
+        self.upload_tables(resolution=resolution, shading=False, slope=False)
         if self.last_afe is not None:
             self.apply_frontend(self.last_afe)
 
@@ -1017,23 +1060,33 @@ class Gl128:
                     )
         return measured
 
-    def upload_tables(self, *, resolution: int, shading: bool = False) -> None:
-        """Upload motor slope and per-channel exposure tables to scanner RAM.
+    def upload_tables(
+        self, *, resolution: int, shading: bool = False, slope: bool = True
+    ) -> None:
+        """Upload motor slope and/or per-channel exposure tables to scanner RAM.
 
-        ``shading=True`` loads the slow ramp (session 03); otherwise the fast
-        ramp used for feeds and image (sessions 03–06).
+        ``shading=True`` loads the slow ramp (session 03 feeds); otherwise the
+        fast ramp used for feeds and image. Pass ``slope=False`` for the
+        unity→white window (session 03/04: exposure AHB only).
         """
         r = self.registers
-        slope = _u16_table_bytes(SLOPE_TABLE_SLOW if shading else SLOPE_TABLE_FAST)
-        self.protocol.write_ahb(r.AHB_SLOPE_SCAN, slope)
-        self.protocol.write_ahb(r.AHB_SLOPE_FAST, slope)
+        if slope:
+            slope_bytes = _u16_table_bytes(
+                SLOPE_TABLE_SLOW if shading else SLOPE_TABLE_FAST
+            )
+            self.protocol.write_ahb(r.AHB_SLOPE_SCAN, slope_bytes)
+            self.protocol.write_ahb(r.AHB_SLOPE_FAST, slope_bytes)
 
         exposure = _u16_table_bytes(exposure_table(self.model.channel_exposure_for(resolution)))
         for addr in (r.AHB_CHANNEL_R, r.AHB_CHANNEL_G, r.AHB_CHANNEL_B):
             self.protocol.write_ahb(addr, exposure)
         logger.debug(
-            "GL128 uploaded %s slope + exposure tables for %d dpi",
-            "slow" if shading else "fast",
+            "GL128 uploaded %s for %d dpi",
+            (
+                "exposure only"
+                if not slope
+                else ("slow slope + exposure" if shading else "fast slope + exposure")
+            ),
             resolution,
         )
 
