@@ -347,4 +347,7 @@ class PlustekBackend:
             cancel=cancel,
         )
         ir_plane = ir_img.ir if ir_img.ir is not None else ir_img.rgb[:, :, 1].copy()
-        return color, np.asarray(ir_plane)
+        from negpy.infrastructure.scanners.plustek.ir_align import align_ir_to_rgb
+
+        ir_plane = align_ir_to_rgb(np.asarray(color.rgb), np.asarray(ir_plane))
+        return color, ir_plane
