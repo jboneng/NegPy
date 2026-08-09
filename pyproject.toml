@@ -55,6 +55,12 @@ camera = [
     # Camera Scanning tab with them — are macOS and Linux only.
     "gphoto2>=2.5 ; sys_platform != 'win32'",
 ]
+# In-tree Plustek USB driver (OpticFilm 8200i SE). Source lives under
+# negpy/infrastructure/scanners/plustek/; this group only pulls PyUSB + bundled libusb.
+plustek = [
+    "pyusb>=1.2.1",
+    "libusb-package>=1.0.26",
+]
 
 [project.urls]
 Homepage = "https://github.com/marcinz606/NegPy"
@@ -66,8 +72,8 @@ Issues = "https://github.com/marcinz606/NegPy/issues"
 requires = ["setuptools~=80.10.2"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["negpy"]
+[tool.setuptools.packages.find]
+include = ["negpy*"]
 
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }

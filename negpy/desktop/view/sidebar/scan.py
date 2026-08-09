@@ -39,13 +39,20 @@ class ScanSidebar(QWidget):
     # ── settings persistence ──────────────────────────────────────────
 
     def _load_settings(self) -> ScannerSettings:
+        from dataclasses import replace
+
         data = self.controller.session.repo.get_global_setting("scanner_settings", default={})
         if isinstance(data, dict) and data:
             try:
-                return ScannerSettings(**data)
+                settings = ScannerSettings(**data)
             except Exception:
-                pass
-        return ScannerSettings.defaults()
+                settings = ScannerSettings.defaults()
+        else:
+            settings = ScannerSettings.defaults()
+        # Drop backends that no longer ship on this platform (e.g. saved "sane" on Windows).
+        if settings.backend not in {bid for bid, _ in backend_choices()}:
+            settings = replace(settings, backend=DEFAULT_BACKEND_ID)
+        return settings
 
     def _save_settings(self) -> None:
         from dataclasses import asdict
@@ -754,21 +761,3 @@ class ScanSidebar(QWidget):
             output_format=self.fmt_combo.currentText(),
             filename_pattern=self.pattern_edit.text().strip() or '{{ date }}_{{ "%03d" % seq }}',
         )
-
-
-class _ScanUnsupportedPlaceholder(QWidget):
-    """Shown on Windows where SANE is not available."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        # No layout alignment and no QSS padding: either one breaks the wrapped
-        # QLabel's height-for-width negotiation and clips the text — the label
-        # must be stretched to full width so it can report its wrapped height.
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        label = QLabel("Scanner support not yet available on Windows.")
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setWordWrap(True)
-        label.setStyleSheet(f"color: {THEME.text_muted}; font-size: {THEME.font_size_base}px;")
-        layout.addWidget(label)

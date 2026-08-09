@@ -15,10 +15,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import sys
-
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
 from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QApplication
 
@@ -245,17 +245,41 @@ def test_ui_edit_preserves_dialog_selection() -> None:
 
 
 def test_backend_combo_lists_registry_default() -> None:
+    from negpy.infrastructure.scanners.registry import DEFAULT_BACKEND_ID
+
     sidebar, _ = _sidebar()
-    assert sidebar.backend_combo.findData("sane") >= 0
-    assert sidebar._current_backend_id() == "sane"
+    assert sidebar.backend_combo.findData("plustek") >= 0
+    assert sidebar._current_backend_id() == DEFAULT_BACKEND_ID
 
 
 def test_request_devices_routes_the_backend() -> None:
+    from negpy.infrastructure.scanners.registry import DEFAULT_BACKEND_ID
+
     sidebar, controller = _sidebar()
     controller.device_requests = 0
     sidebar._request_devices()
-    assert controller.backend_requests[-1] == "sane"
+    assert controller.backend_requests[-1] == DEFAULT_BACKEND_ID
     assert controller.device_requests == 1
+
+
+def test_load_settings_coerces_unavailable_backend(monkeypatch) -> None:
+    """A saved Unix-only backend must not stick on Windows."""
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Windows-only coercion")
+
+    from negpy.infrastructure.scanners.registry import DEFAULT_BACKEND_ID
+    from negpy.infrastructure.scanners.settings import ScannerSettings
+
+    sidebar, controller = _sidebar()
+    controller.session.repo.save_global_setting(
+        "scanner_settings",
+        {"backend": "sane", "dpi": 1800, "depth": 16},
+    )
+    loaded = sidebar._load_settings()
+    assert loaded.backend == DEFAULT_BACKEND_ID
+    assert isinstance(loaded, ScannerSettings)
 
 
 def test_backend_change_persists_and_re_enumerates(monkeypatch) -> None:

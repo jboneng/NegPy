@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from negpy.desktop.power_assertion import acquire_unattended_power_assertion
-from negpy.infrastructure.scanners.base import ScannerDevice
+from negpy.infrastructure.scanners.base import ScannerDevice, ScannerUnavailable
 from negpy.infrastructure.scanners.params import ScanParams
 from negpy.services.scanning.service import ScannerService
 from negpy.kernel.system.logging import get_logger
@@ -96,6 +96,10 @@ class ScanWorker(QObject):
             service = self._ensure_service()
             devices = service.refresh_devices()
             self.devices_ready.emit(devices)
+        except ScannerUnavailable as e:
+            logger.warning("Device listing unavailable: %s", e)
+            self.devices_ready.emit([])
+            self.error.emit(str(e))
         except Exception as e:
             logger.exception("Device listing failed")
             # Empty list first: the sidebar's devices_ready handler overwrites the
