@@ -130,13 +130,17 @@ class ScanSidebar(QWidget):
         self.ir_check = QCheckBox("IR")
         self.ir_check.setToolTip("Scan a separate infrared channel for dust detection")
 
-        depth_row = QHBoxLayout()
+        self.depth_row_widget = QWidget()
+        depth_row = QHBoxLayout(self.depth_row_widget)
         depth_row.setContentsMargins(0, 0, 0, 0)
         self.depth_combo = QComboBox()
         self.depth_combo.setToolTip("Bit depth")
         depth_row.addWidget(self.depth_combo, 1)
         depth_row.addWidget(self.ir_check)
-        self.form.addRow("Depth", depth_row)
+        self.depth_label = QLabel("Depth")
+        self.form.addRow(self.depth_label, self.depth_row_widget)
+        self.depth_combo.setVisible(False)
+        self.depth_label.setVisible(False)
 
         # Spanning rows (no label column) so the checkboxes sit at the left edge.
         self.autofocus_check = QCheckBox("Autofocus")
@@ -374,6 +378,8 @@ class ScanSidebar(QWidget):
             self.frame_label.setText("")
             self.dpi_combo.setEnabled(False)
             self.depth_combo.setEnabled(False)
+            self.depth_combo.setVisible(False)
+            self.depth_label.setVisible(False)
             self.ir_check.setEnabled(False)
             self.eject_btn.setVisible(False)
             self.frame_range_label.setVisible(False)
@@ -424,7 +430,8 @@ class ScanSidebar(QWidget):
             else:
                 self.dpi_combo.setCurrentText(str(self._settings.dpi))
 
-        # Depth — default to the deepest supported when the saved value is absent
+        # Depth — shown only when the device offers more than one bit depth.
+        # Default to the deepest supported when the saved value is absent
         # (a saved 16 does not exist on a 14-bit LS-50; findData → -1 must not
         # leave the combo silently on index 0 = 8-bit).
         self.depth_combo.clear()
@@ -436,6 +443,9 @@ class ScanSidebar(QWidget):
                 idx = self.depth_combo.findData(max(caps.supported_depths))
             if idx >= 0:
                 self.depth_combo.setCurrentIndex(idx)
+        show_depth = len(caps.supported_depths) > 1
+        self.depth_combo.setVisible(show_depth)
+        self.depth_label.setVisible(show_depth)
 
         # IR
         self.ir_check.setEnabled(caps.ir_channel)

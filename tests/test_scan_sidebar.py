@@ -63,7 +63,7 @@ LS50_DEVICE = ScannerDevice(id="coolscan3:usb:libusb:001:050", vendor="Nikon", m
 MINIMAL_CAPS = ScannerCapabilities(
     ir_channel=False,
     supported_dpi=(1200, 2400),
-    supported_depths=(8, 16),
+    supported_depths=(16,),
     sources=(ScanMode.NEGATIVE,),
     max_area_mm=(36.0, 24.0),
 )
@@ -142,6 +142,8 @@ def test_no_device_disables_controls() -> None:
     assert sidebar.frame_range_widget.isVisibleTo(sidebar) is False
     assert sidebar.ae_check.isVisibleTo(sidebar) is False
     assert sidebar.autofocus_check.isVisibleTo(sidebar) is False
+    assert sidebar.depth_combo.isVisibleTo(sidebar) is False
+    assert sidebar.depth_label.isVisibleTo(sidebar) is False
 
 
 def test_full_capability_device_enables_coolscan_controls() -> None:
@@ -153,6 +155,8 @@ def test_full_capability_device_enables_coolscan_controls() -> None:
     assert sidebar.frame_range_widget.isVisibleTo(sidebar) is True
     assert sidebar.frame_from_spin.maximum() == 40
     assert sidebar.frame_to_spin.maximum() == 40
+    assert sidebar.depth_combo.isVisibleTo(sidebar) is True
+    assert sidebar.depth_label.isVisibleTo(sidebar) is True
 
 
 def test_minimal_device_hides_coolscan_controls() -> None:
@@ -164,6 +168,9 @@ def test_minimal_device_hides_coolscan_controls() -> None:
     assert sidebar.autofocus_check.isVisibleTo(sidebar) is False
     assert sidebar.eject_btn.isVisibleTo(sidebar) is False
     assert sidebar.frame_range_widget.isVisibleTo(sidebar) is False
+    assert sidebar.depth_combo.isVisibleTo(sidebar) is False
+    assert sidebar.depth_label.isVisibleTo(sidebar) is False
+    assert sidebar.depth_combo.currentData() == 16
     assert sidebar.scan_btn.isEnabled() is True
 
 
@@ -171,6 +178,7 @@ def test_14_bit_device_defaults_to_14_not_8() -> None:
     sidebar, _ = _sidebar(LS50_DEVICE)
     # Saved default depth 16 is not offered on an (8, 14) scanner; the combo must
     # land on the deepest supported, never silently on index 0 = 8-bit.
+    assert sidebar.depth_combo.isVisibleTo(sidebar) is True
     assert sidebar.depth_combo.currentData() == 14
 
 
