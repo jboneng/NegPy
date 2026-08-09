@@ -157,6 +157,9 @@ def bringup_scan_geometry(
     else:
         area, meta = preview_safe_scan_area(model, dpi, y1=0.0)
 
+    # Do not shrink X to the AHB shading-table width. SF Full window at 1800 is
+    # 2592 px; clamping to 2517 made USB line length disagree with the ASIC and
+    # sheared the frame into a diamond. Pad the shading table up instead.
     geometry = compute_geometry(dpi, model=model, area=area)
     geometry = apply_target_lincnt(geometry, int(meta["target_lincnt"]))
 
@@ -165,5 +168,32 @@ def bringup_scan_geometry(
         "geometry_lincnt": geometry.lincnt_register,
         "optical_line_count": geometry.optical_line_count,
         "area": geometry.area,
+        "pixels": geometry.pixels,
     }
     return geometry, meta
+
+
+def _clamp_area_to_shading_table(model: Any, dpi: int, area: Area) -> Area:
+    """Deprecated: shrinking the image window to the AHB table shears USB lines.
+
+    Kept for unit tests that assert the old ratio math. Prefer padding the
+    shading table to the acquire width.
+    """
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        shading_acquire_width,
+        shading_width_for_resolution,
+    )
+
+    probe = compute_geometry(dpi, model=model, area=area)
+    table_n = shading_width_for_resolution(dpi)
+    n = shading_acquire_width(
+        strpixel=probe.pixel_startx,
+        endpixel=probe.pixel_endx,
+        dpiset=probe.register_dpiset,
+        optical_resolution=int(getattr(model, "optical_resolution", 7200)),
+    )
+    if n <= table_n:
+        return area
+    x1, y1, x2, y2 = area
+    width = max(1e-9, x2 - x1)
+    return (x1, y1, x1 + width * (table_n / n), y2)

@@ -52,3 +52,10 @@ In the Scan tab, Backend should be **Plustek (USB)**. Refresh the device list; t
 | `DriverBindingError` / access denied | WinUSB not bound; another app has the handle |
 | `UsbError` / link failures | Cable/hub; try a direct motherboard port |
 | Missing PyUSB hint in the UI | Run `uv sync --group plustek` |
+| First scan at a DPI takes a few seconds | Normal — AFE + one dark + one white shading strip (same choreography as SilverFast), then cached per resolution |
+| Darker corners than SilverFast on Full window | Full window includes ~0.8 mm holder chrome; shading is per-column only, so residual Y falloff at those edges is expected vs a tighter SilverFast frame |
+| Rainbow vertical “barcode” stripes | ASIC `DVDSET` armed with whites that were not HW post-unity (raw ~55k, or host-fake ~12k). Leave DVDSET off; use host dark/white stretch until HW white ~12k. Delete `plustek_calib` (cache v9+) and rescan |
+| Diamond / sheared scene (objects lean) | Image X was shrunk to the AHB shading width while USB still paced the full line. Full window @1800 must stay ~2592 px; pad the shading table up. Delete `plustek_calib` (cache v9+) and rescan — log should show `pixels=2592` |
+| Scan fails: white mean > 20000 | Only when host fallback cannot run. Log should prefer host stretch when `host_unity_preview` ~12k; check `0x01` START=`0x23` if both ASIC and host paths fail |
+| Scan fails: white≈dark / DVDSET span | Often a stale AHB strip (wait until buffer has data **at home**; motor-busy `0xa5` is not ready). Also check lamp actually off and head on clear home chrome. Cache v6+ ignores collapsed calib |
+| Scan fails: colour ASIC shading / clear home field | Carriage not on the clear home sensor; park/power-cycle, then retry (film may stay loaded) |

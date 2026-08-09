@@ -84,14 +84,17 @@ class ScanSession:
 
         calib = None
         if apply_calib and self.calibrator is not None:
-            calib = self.calibrator.find_for_scan(method=method, geometry=geometry)
-            if calib is None:
-                logger.warning(
-                    "No calib cache for method=%s dpi=%d — scanning uncalibrated. "
-                    "Run Scanner.calibrate() / plustekctl calibrate.",
-                    method,
-                    geometry.resolution,
-                )
+            if method == "transparency":
+                # SilverFast order: home measure/apply before any image feed.
+                calib = self.calibrator.ensure_colour_asic_shading(geometry)
+            else:
+                calib = self.calibrator.find_for_scan(method=method, geometry=geometry)
+                if calib is None:
+                    logger.warning(
+                        "No calib cache for method=%s dpi=%d — scanning uncalibrated.",
+                        method,
+                        geometry.resolution,
+                    )
 
         raw = self.acquire_raw(
             geometry,
@@ -101,28 +104,6 @@ class ScanSession:
             progress=progress,
             cancel=cancel,
         )
-
-        if (
-            calib is not None
-            and calib.asic_shading
-            and self.calibrator is not None
-            and self.calibrator.asic is not None
-            and not getattr(self.calibrator.asic, "asic_shading_ready", False)
-        ):
-            # Cache says ASIC shading, but this process has not uploaded yet —
-            # re-run stationary shading (motor stays gated).
-            shade = getattr(self.calibrator.asic, "run_asic_shading", None)
-            if callable(shade):
-                logger.info(
-                    "Re-uploading GL128 ASIC shading for dpi=%d", geometry.resolution
-                )
-                shade(
-                    resolution=geometry.resolution,
-                    strpixel=geometry.pixel_startx,
-                    endpixel=geometry.pixel_endx,
-                    dpiset=geometry.register_dpiset,
-                )
-                self.calibrator.prefer_asic_shading = True
 
         use_host = (
             calib is not None

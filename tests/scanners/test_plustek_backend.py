@@ -82,6 +82,15 @@ def _fake_scanner(*, progress_steps: int = 0, scan_error: Exception | None = Non
         )
 
     scanner.scan.side_effect = scan
+    scanner.calibrate = MagicMock(return_value=MagicMock(asic_shading=True, has_asic_blob=True))
+    scanner.calibrator = MagicMock()
+    scanner.calibrator.find_for_scan.return_value = None
+    scanner.calibrator.ensure_colour_asic_shading = MagicMock(
+        return_value=MagicMock(asic_shading=True, has_asic_blob=True)
+    )
+    scanner._bringup_motor_armed = True
+    scanner.disarm_bringup_motor = MagicMock()
+    scanner.arm_bringup_motor = MagicMock()
     scanner.close = MagicMock()
     return scanner
 
@@ -211,6 +220,37 @@ def test_capture_ir_returns_ir_plane(monkeypatch):
     assert result.ir is not None
     assert result.ir.ndim == 2
     assert scanner.scan.call_count == 2
+
+
+def test_scan_ensures_colour_calib_before_scan(monkeypatch):
+    _patch_enum(monkeypatch)
+    scanner = _fake_scanner()
+    order: list[str] = []
+    scanner.calibrator.ensure_colour_asic_shading.side_effect = lambda *_a, **_k: (
+        order.append("ensure") or MagicMock(asic_shading=True, has_asic_blob=True)
+    )
+    inner_scan = scanner.scan.side_effect
+
+    def scan_tracked(**kwargs):
+        order.append("scan")
+        return inner_scan(**kwargs)
+
+    scanner.scan.side_effect = scan_tracked
+    monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
+    PlustekBackend().scan(_DEVICE_ID, _params(), lambda _: None, threading.Event())
+    assert order[0] == "ensure"
+    assert "scan" in order
+
+
+def test_scan_skips_calib_when_asic_already_ready(monkeypatch):
+    _patch_enum(monkeypatch)
+    scanner = _fake_scanner()
+    entry = MagicMock(asic_shading=True, has_asic_blob=True)
+    scanner.calibrator.find_for_scan.return_value = entry
+    scanner.asic.asic_shading_ready = True
+    monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
+    PlustekBackend().scan(_DEVICE_ID, _params(), lambda _: None, threading.Event())
+    scanner.calibrator.ensure_colour_asic_shading.assert_not_called()
 
 
 def test_default_se_scan_passes_preview_safe_geometry(monkeypatch):

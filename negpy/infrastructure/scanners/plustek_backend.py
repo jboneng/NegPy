@@ -252,6 +252,14 @@ class PlustekBackend:
             raise RuntimeError("Scan cancelled before start")
 
         try:
+            self._ensure_colour_calib(
+                scanner,
+                dpi=dpi,
+                window=window,
+                geometry=geometry,
+                progress=progress,
+                cancel=cancel,
+            )
             if capture_ir:
                 rgb_image, ir_plane = self._scan_color_and_ir(
                     scanner,
@@ -260,14 +268,19 @@ class PlustekBackend:
                     geometry=geometry,
                     progress=progress,
                     cancel=cancel,
+                    progress_start=0.1,
                 )
             else:
+
+                def color_only_progress(p: float) -> None:
+                    _safe_progress(progress, 0.1 + 0.9 * p)
+
                 rgb_image = scanner.scan(
                     resolution=dpi,
                     mode="color",
                     area=None if geometry is not None else window,
                     geometry=geometry,
-                    progress=progress,
+                    progress=color_only_progress,
                     cancel=cancel,
                 )
                 ir_plane = None
@@ -286,6 +299,72 @@ class PlustekBackend:
             device_model=rgb_image.device_model or f"{scanner.model.vendor} {scanner.model.model}",
             ir_valid_mask=None,
         )
+
+    @staticmethod
+    def _ensure_colour_calib(
+        scanner: Scanner,
+        *,
+        dpi: int,
+        window: tuple[float, float, float, float] | None,
+        geometry: object | None,
+        progress: Callable[[float], None],
+        cancel: threading.Event,
+    ) -> None:
+        """Home ASIC shading before the colour feed (apply cache or measure).
+
+        Progress uses 0–0.1 so a cold measure does not look hung. Film may stay
+        loaded — shading runs at home before position feeds, like SilverFast.
+        """
+        if cancel.is_set():
+            raise RuntimeError("Scan cancelled before start")
+        _safe_progress(progress, 0.02)
+        from negpy.infrastructure.scanners.plustek.exceptions import CalibrationError
+        from negpy.infrastructure.scanners.plustek.scan.geometry import ScanGeometry
+
+        geo = geometry if isinstance(geometry, ScanGeometry) else None
+        if geo is None and window is not None:
+            from negpy.infrastructure.scanners.plustek.scan.geometry import compute_geometry
+
+            geo = compute_geometry(dpi, model=scanner.model, area=window)
+        if geo is None:
+            from negpy.infrastructure.scanners.plustek.scan.bringup import (
+                bringup_scan_geometry,
+                is_opticfilm_8200i_se,
+            )
+
+            if is_opticfilm_8200i_se(scanner.model):
+                geo, _ = bringup_scan_geometry(scanner.model, dpi, profile="preview_safe")
+        if geo is None:
+            _safe_progress(progress, 0.1)
+            return
+
+        asic = scanner.asic
+        calibrator = scanner.calibrator
+        hit = calibrator.find_for_scan(method="transparency", geometry=geo)
+        if (
+            hit is not None
+            and hit.has_asic_blob
+            and getattr(asic, "asic_shading_ready", False)
+        ):
+            _safe_progress(progress, 0.1)
+            return
+
+        logger.info("Ensuring colour ASIC shading for dpi=%d", dpi)
+        try:
+            # Prefer ensure (apply or measure); Scanner.calibrate also parks motor.
+            was_armed = scanner._bringup_motor_armed
+            try:
+                if getattr(scanner.model, "asic", "") == "GL128":
+                    scanner.disarm_bringup_motor()
+                calibrator.ensure_colour_asic_shading(geo)
+            finally:
+                if was_armed:
+                    scanner.arm_bringup_motor()
+        except CalibrationError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if cancel.is_set():
+            raise RuntimeError("Scan cancelled")
+        _safe_progress(progress, 0.1)
 
     @staticmethod
     def _default_scan_geometry(
@@ -316,12 +395,15 @@ class PlustekBackend:
         geometry: object | None,
         progress: Callable[[float], None],
         cancel: threading.Event,
+        progress_start: float = 0.0,
     ) -> tuple[Any, np.ndarray]:
+        span = max(0.0, 1.0 - progress_start)
+
         def color_progress(p: float) -> None:
-            _safe_progress(progress, 0.5 * p)
+            _safe_progress(progress, progress_start + 0.5 * span * p)
 
         def ir_progress(p: float) -> None:
-            _safe_progress(progress, 0.5 + 0.5 * p)
+            _safe_progress(progress, progress_start + 0.5 * span * (1.0 + p))
 
         if cancel.is_set():
             raise RuntimeError("Scan cancelled before start")

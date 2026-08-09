@@ -35,6 +35,9 @@ AFE_ENDPIXEL = 0x240  # 576 → 512 pixels
 
 #: Wider mid-search read observed between offset and gain phases (session 03/04).
 AFE_WIDE_BYTES = 62268
+AFE_WIDE_PIXELS = AFE_WIDE_BYTES // 6  # 10378
+#: Capture wide window: STRPIXEL=64, ENDPIXEL=10442 (span 10378).
+AFE_WIDE_ENDPIXEL = AFE_STRPIXEL + AFE_WIDE_PIXELS
 
 #: ASIC shading coefficient window.
 AHB_SHADING = 0x10014000
@@ -44,6 +47,10 @@ SHADING_RECORD_BYTES = 12
 
 #: Placeholder white term before the measured shading pass (``0x2000``).
 SHADING_UNITY_WHITE = 0x2000
+
+#: Genesys-style unity reshape divisor used only for diagnostics:
+#: ``(sample - dark) * SHADING_UNITY_WHITE / SHADING_UNITY_DIVISOR``.
+SHADING_UNITY_DIVISOR = 0x8000
 
 #: Declared shading upload size includes a 4-byte pad after N×12 payload bytes.
 SHADING_SIZE_PAD = 4
@@ -68,10 +75,6 @@ SHADING_WIDTH_BY_DPI: dict[int, int] = {
     3600: 5034,  # session 06 declared 60416 ≈ 12*5034+4
     7200: 10385,
 }
-#: Best-fit divisor for capture coarse offsets: ``round((65535 - mean) / D)``.
-#: Fits sessions 03/04 within ±2 counts; not a proven SilverFast identity.
-AFE_OFFSET_COARSE_DIVISOR = 1155
-
 #: Dichotomy defaults (16-bit strip means). White target sits near the mid-phase
 #: means seen after offsets settle (~0xCC00–0xD800 at gain 0xFF) *when the head
 #: is on a bright calib patch*. At home / underexposed, that target is unreachable
@@ -81,11 +84,20 @@ AFE_GAIN_TARGET = 0xD000
 AFE_OFFSET_MAX = 0xFF
 AFE_GAIN_MAX = 0x1FF
 AFE_DICHOTOMY_ITERS = 9
+#: Colour gain search floor — SF sessions 03/04 settle ~18–31; never walk to 0.
+AFE_GAIN_MIN = 0x10
 #: Floor/ceiling when adapting the gain target from a mid-gain probe.
 #: Floor is soft — :func:`adaptive_afe_gain_target` may return the probe peak
 #: itself when that is below this (see implementation).
 AFE_GAIN_TARGET_MIN = 0x0800
 AFE_GAIN_TARGET_MAX = AFE_GAIN_TARGET
+#: SF sessions 03/04 shading white0 ≈ 11.5–12.1k — aim here when 0x80 probe is already hot.
+AFE_GAIN_TARGET_SF_WHITE = 0x3000
+#: Session-04 colour gain fallback when search collapses to zero.
+COLOR_AFE_SESSION04_GAINS: tuple[int, int, int] = (0x14, 0x1F, 0x17)
+#: Best-fit divisor for capture coarse offsets: ``round((65535 - mean) / D)``.
+#: Fits sessions 03/04 within ±2 counts (CALIB.md); not a proven SF identity.
+AFE_OFFSET_COARSE_DIVISOR = 1155
 
 
 def _u16_plane(strip: bytes, *, pixels: int) -> list[int]:
@@ -132,16 +144,38 @@ def choose_usb_planar(strip: bytes, *, pixels: int = AFE_STRIP_PIXELS) -> bool:
 def adaptive_afe_gain_target(probe_means: Sequence[float]) -> float:
     """Pick a reachable white target from a mid-gain (0x80) probe.
 
-    The capture default ``0xD000`` assumes a bright calib patch. At home the
-    strip is often far darker, so insisting on ``0xD000`` pegs ``gain_max``.
-    Aim ~15% above the probe peak so dichotomy settles near mid gain instead.
+    SF sessions 03/04 settle gains *down* from ``0x80`` toward ~20 with shading
+    whites ~12k. If the mid-gain probe is already at/above that band, aim at
+    ``AFE_GAIN_TARGET_SF_WHITE`` so dichotomy lowers gains. If the probe is
+    dimmer (dark home), aim ~15% above the peak so search can raise gains.
     """
     peak = max(float(m) for m in probe_means) if probe_means else 0.0
     if peak <= 0:
         return float(AFE_GAIN_TARGET_MIN)
-    # Slightly above current mid-gain reading; never above the capture default.
+    if peak >= float(AFE_GAIN_TARGET_SF_WHITE):
+        return float(AFE_GAIN_TARGET_SF_WHITE)
     guessed = max(peak * 1.15, peak + 256.0)
     return float(max(AFE_GAIN_TARGET_MIN, min(AFE_GAIN_TARGET_MAX, int(guessed))))
+
+
+def coarse_offsets_from_wide_means(
+    means: Sequence[float],
+    *,
+    divisor: int = AFE_OFFSET_COARSE_DIVISOR,
+    offset_max: int = AFE_OFFSET_MAX,
+) -> tuple[int, int, int]:
+    """Capture coarse offset seed: ``round((65535 - mean) / divisor)``.
+
+    Matches sessions 03/04 within a couple of counts (CALIB.md). Seed offset
+    dichotomy from this rather than ``(0,0,0)``.
+    """
+    if len(means) != 3:
+        raise ValueError("means must be length-3 RGB")
+    out: list[int] = []
+    for mean in means:
+        code = int(round((65535.0 - float(mean)) / float(divisor)))
+        out.append(max(0, min(int(offset_max), code)))
+    return (out[0], out[1], out[2])
 
 
 def rgb_layout_score(rgb) -> float:
@@ -271,10 +305,7 @@ def shading_entry_count(declared_size: int) -> int:
     """Number of per-pixel records for a declared AHB shading upload size."""
     usable = int(declared_size) - SHADING_SIZE_PAD
     if usable < 0 or usable % SHADING_RECORD_BYTES:
-        raise ValueError(
-            f"Shading declared_size={declared_size} is not pad+12*N "
-            f"(pad={SHADING_SIZE_PAD})"
-        )
+        raise ValueError(f"Shading declared_size={declared_size} is not pad+12*N (pad={SHADING_SIZE_PAD})")
     return usable // SHADING_RECORD_BYTES
 
 
@@ -319,6 +350,41 @@ def shading_acquire_width(
     return max(1, span // factor)
 
 
+def shading_native_factor(*, dpiset: int, optical_resolution: int = 7200) -> int:
+    """Native-dpi samples per USB pixel for ``DPISET`` (session 04: 4 at 1800)."""
+    dpi = max(1, int(dpiset) * 6)
+    return max(1, int(optical_resolution) // dpi)
+
+
+def clamp_endpixel_to_shading_table(
+    *,
+    strpixel: int,
+    endpixel: int,
+    dpiset: int,
+    table_n: int,
+    optical_resolution: int = 7200,
+) -> tuple[int, int]:
+    """Narrow ``ENDPIXEL`` so acquire width ≤ capture-proven AHB table width.
+
+    Growing the AHB blob past ``SHADING_WIDTH_BY_DPI`` (Full window at 1800/3600)
+    makes DVDSET index with a ~126 px period barcode. Captures pad *up* to the
+    table width; they never upload a wider table.
+    """
+    start = int(strpixel)
+    end = int(endpixel)
+    n = shading_acquire_width(
+        strpixel=start,
+        endpixel=end,
+        dpiset=dpiset,
+        optical_resolution=optical_resolution,
+    )
+    limit = max(1, int(table_n))
+    if n <= limit:
+        return end, n
+    factor = shading_native_factor(dpiset=dpiset, optical_resolution=optical_resolution)
+    return start + limit * factor, limit
+
+
 #: Session 05 IR measured whites: spread 149. Gate allows some home-film slack.
 IR_SHADING_WHITE_SPREAD_MAX = 500
 #: Dark terms on IR are ≈0 in session 05; allow a small floor for noise.
@@ -331,6 +397,190 @@ IR_SHADING_WHITE_CLIP_FRAC = 0.90
 #: Period of the old mis-acquire dropout pattern (SHADING_LINES bug era).
 IR_SHADING_DROPOUT_PERIOD = 126
 IR_SHADING_DROPOUT_MIN_RUNS = 4
+
+#: Colour lamp-off dark must stay near session-04 black (~1k), not mid-scale film.
+COLOR_SHADING_DARK_MEAN_MAX = 3000
+#: Colour white strip floor — SF sessions 03/04 measure ~11.5–12.1k at home, not
+#: mid-scale image targets. Same band as IR; span/range remain the DVDSET safety net.
+COLOR_SHADING_WHITE_MEAN_MIN = 10000
+#: Reject raw (DVDSET-off) white measures — SF post-unity whites sit ~11–13k;
+#: ≥25k means the white strip was not taken through unity DVDSET (diamond/moiré).
+COLOR_SHADING_WHITE_MEAN_MAX = 20000
+#: Per-channel mean(white) - mean(dark) floor — below this DVDSET inverts/clips.
+COLOR_SHADING_MIN_RANGE = 8000
+#: Overall white_mean - dark_mean floor (healthy SF-like DVDSET span).
+COLOR_SHADING_SPAN_MIN = 8000
+#: Orange-mask heuristic: R mean below this fraction of min(G, B) at home.
+COLOR_SHADING_FILM_R_FRAC = 0.55
+COLOR_SHADING_FILM_GB_MIN = 12000
+#: SF colour off→dark gap ≈0.52s (session 03); IR dark settle (table dark forced to 0).
+COLOR_SHADING_DARK_SETTLE_S = 0.5
+IR_SHADING_DARK_SETTLE_S = 0.5
+#: Planar/chunky flip only when alternate mean improves by at least this.
+COLOR_SHADING_LAYOUT_MEAN_IMPROVE_MIN = 5000.0
+
+
+def shading_columns_mean(cols: Sequence[Sequence[int]]) -> float:
+    """Mean of all channel samples across columns."""
+    if not cols:
+        return 0.0
+    return sum(int(c) for row in cols for c in row) / max(1, len(cols) * 3)
+
+
+def host_unity_preview_mean(
+    dark: Sequence[Sequence[int]],
+    white: Sequence[Sequence[int]],
+) -> float:
+    """Diagnostic mean after ``(w-d)*unity/0x8000`` (SF post-unity band check)."""
+    cols = host_unity_reshape_columns(dark, white)
+    return shading_columns_mean(cols)
+
+
+def host_unity_reshape_columns(
+    dark: Sequence[Sequence[int]],
+    white: Sequence[Sequence[int]],
+) -> list[tuple[int, int, int]]:
+    """Per-column ``(w-d)*SHADING_UNITY_WHITE/0x8000`` (SF post-unity white shape)."""
+    n = min(len(dark), len(white))
+    scale = SHADING_UNITY_WHITE / float(SHADING_UNITY_DIVISOR)
+    out: list[tuple[int, int, int]] = []
+    for i in range(n):
+        drow = dark[i]
+        wrow = white[i]
+        ch: list[int] = []
+        for c in range(3):
+            d = int(drow[c]) if c < len(drow) else 0
+            w = int(wrow[c]) if c < len(wrow) else 0
+            ch.append(max(0, min(65535, int(round(max(0, w - d) * scale)))))
+        out.append((ch[0], ch[1], ch[2]))
+    return out
+
+
+def maybe_host_unity_colour_white(
+    dark: Sequence[Sequence[int]],
+    white: Sequence[Sequence[int]],
+) -> tuple[list[tuple[int, int, int]], bool, float, float]:
+    """If HW DVDSET left whites raw-hot, replace with host unity reshape when in-band.
+
+    Returns ``(columns, used_host_reshape, raw_mean, result_mean)``.
+    """
+    cols = [(int(r[0]), int(r[1]), int(r[2])) for r in white]
+    raw_mean = shading_columns_mean(cols)
+    if raw_mean <= float(COLOR_SHADING_WHITE_MEAN_MAX):
+        return cols, False, raw_mean, raw_mean
+    reshaped = host_unity_reshape_columns(dark, cols)
+    preview_mean = shading_columns_mean(reshaped)
+    if (
+        float(COLOR_SHADING_WHITE_MEAN_MIN)
+        <= preview_mean
+        <= float(COLOR_SHADING_WHITE_MEAN_MAX)
+    ):
+        return reshaped, True, raw_mean, preview_mean
+    return cols, False, raw_mean, raw_mean
+
+
+def pick_shading_dark_layout(
+    primary: Sequence[Sequence[int]],
+    alternate: Sequence[Sequence[int]],
+    *,
+    primary_is_planar: bool,
+    dark_mean_max: float = COLOR_SHADING_DARK_MEAN_MAX,
+    mean_improve_min: float = COLOR_SHADING_LAYOUT_MEAN_IMPROVE_MIN,
+) -> tuple[list[tuple[int, int, int]], bool]:
+    """Choose dark-column USB layout for shading averages.
+
+    Flip only when the alternate mean is strictly lower and either falls under
+    ``dark_mean_max`` or improves by at least ``mean_improve_min``. Equal means
+    (balance-only) keep the primary layout — total mean is layout-invariant.
+    """
+    mean_a = shading_columns_mean(primary)
+    mean_b = shading_columns_mean(alternate)
+    use_alt = mean_b < mean_a and (mean_b <= dark_mean_max or (mean_a - mean_b) >= mean_improve_min)
+    chosen = alternate if use_alt else primary
+    planar = (not primary_is_planar) if use_alt else primary_is_planar
+    return [(int(row[0]), int(row[1]), int(row[2])) for row in chosen], planar
+
+
+def color_shading_looks_like_film(white: Sequence[Sequence[int]]) -> bool:
+    """True when a home white strip looks like colour-neg orange mask, not clear TA."""
+    if not white:
+        return False
+    wr = sum(int(row[0]) for row in white) / len(white)
+    wg = sum(int(row[1]) for row in white) / len(white)
+    wb = sum(int(row[2]) for row in white) / len(white)
+    gb = min(wg, wb)
+    return gb >= COLOR_SHADING_FILM_GB_MIN and wr < gb * COLOR_SHADING_FILM_R_FRAC
+
+
+def validate_color_shading_table(
+    dark: Sequence[Sequence[int]],
+    white: Sequence[Sequence[int]],
+    *,
+    acquire_width: int | None = None,
+) -> tuple[bool, str]:
+    """Return ``(ok, reason)`` before arming colour DVDSET.
+
+    Requires a SilverFast-like white-dark span so DVDSET cannot clip to white.
+    Elevated absolute dark is allowed only when that span is still healthy.
+    """
+    if not dark or not white:
+        return False, "empty dark/white"
+    if len(dark) != len(white):
+        return False, f"dark/white length mismatch {len(dark)}!={len(white)}"
+    if acquire_width is not None and acquire_width > 0:
+        n = min(int(acquire_width), len(white))
+        if n < 8:
+            return False, f"acquire_width too small ({n})"
+        dark = dark[:n]
+        white = white[:n]
+
+    dark_mean = sum(int(c) for row in dark for c in row) / max(1, len(dark) * 3)
+    white_mean = sum(int(c) for row in white for c in row) / max(1, len(white) * 3)
+    span = white_mean - dark_mean
+    if white_mean < COLOR_SHADING_WHITE_MEAN_MIN:
+        return False, f"white mean {white_mean:.0f} < {COLOR_SHADING_WHITE_MEAN_MIN}"
+    if white_mean > COLOR_SHADING_WHITE_MEAN_MAX:
+        return (
+            False,
+            f"white mean {white_mean:.0f} > {COLOR_SHADING_WHITE_MEAN_MAX} "
+            "(need post-unity DVDSET white ~12k, not raw CCD)",
+        )
+    if color_shading_looks_like_film(white):
+        return False, "white strip looks like film (not clear home field)"
+    if span < COLOR_SHADING_SPAN_MIN:
+        return (
+            False,
+            f"white≈dark (span {span:.0f} < {COLOR_SHADING_SPAN_MIN}); dark_mean={dark_mean:.0f} white_mean={white_mean:.0f}",
+        )
+
+    for ch in range(3):
+        d = sum(int(row[ch]) for row in dark) / len(dark)
+        w = sum(int(row[ch]) for row in white) / len(white)
+        if w <= d:
+            return (
+                False,
+                f"ch{ch} white≈dark (w={w:.0f} d={d:.0f}); dark_mean={dark_mean:.0f} white_mean={white_mean:.0f}",
+            )
+        if (w - d) < COLOR_SHADING_MIN_RANGE:
+            return False, f"ch{ch} range {w - d:.0f} < {COLOR_SHADING_MIN_RANGE}"
+
+    # Period≈126 zero/dropout columns — SHADING_LINES-era barcode (IR gate reused).
+    zero_cols = [
+        i
+        for i, row in enumerate(white)
+        if min(int(c) for c in row) < COLOR_SHADING_WHITE_MEAN_MIN // 4
+    ]
+    if len(zero_cols) >= IR_SHADING_DROPOUT_MIN_RUNS and _has_periodic_dropouts(
+        zero_cols, IR_SHADING_DROPOUT_PERIOD
+    ):
+        return (
+            False,
+            f"periodic white dropouts (n={len(zero_cols)}, period≈{IR_SHADING_DROPOUT_PERIOD})",
+        )
+
+    if dark_mean > COLOR_SHADING_DARK_MEAN_MAX:
+        return True, f"ok (soft dark mean {dark_mean:.0f}, span {span:.0f})"
+    return True, "ok"
 
 
 def validate_ir_shading_table(
@@ -391,18 +641,11 @@ def validate_ir_shading_table(
     bar_vals = [int(c) for row in bar_white for c in row]
     if bar_vals and min(bar_vals) <= 0:
         # Count zero-valued green (or any) channel columns — bar signature.
-        zero_cols = [
-            i
-            for i, row in enumerate(bar_white)
-            if any(int(c) <= 0 for c in row)
-        ]
-        if len(zero_cols) >= IR_SHADING_DROPOUT_MIN_RUNS and _has_periodic_dropouts(
-            zero_cols, IR_SHADING_DROPOUT_PERIOD
-        ):
+        zero_cols = [i for i, row in enumerate(bar_white) if any(int(c) <= 0 for c in row)]
+        if len(zero_cols) >= IR_SHADING_DROPOUT_MIN_RUNS and _has_periodic_dropouts(zero_cols, IR_SHADING_DROPOUT_PERIOD):
             return (
                 False,
-                f"periodic zero whites (n={len(zero_cols)}, "
-                f"period≈{IR_SHADING_DROPOUT_PERIOD})",
+                f"periodic zero whites (n={len(zero_cols)}, period≈{IR_SHADING_DROPOUT_PERIOD})",
             )
         if min(bar_vals) <= 0 and len(zero_cols) > max(8, len(bar_white) // 20):
             return False, f"too many zero white columns ({len(zero_cols)})"
@@ -493,16 +736,10 @@ def flatten_ir_columns(
         raise ValueError(f"expected HxW infrared plane, got {arr.shape}")
     width = int(arr.shape[1])
     if len(white) < width:
-        raise ValueError(
-            f"white profile length {len(white)} < image width {width}"
-        )
+        raise ValueError(f"white profile length {len(white)} < image width {width}")
     w_raw = np.asarray([max(1, int(v)) for v in white[:width]], dtype=np.float32)
     # ~2.5% of width each side; skip on tiny synthetic profiles.
-    half = (
-        (0 if width < 64 else max(8, width // 40))
-        if smooth_half is None
-        else int(smooth_half)
-    )
+    half = (0 if width < 64 else max(8, width // 40)) if smooth_half is None else int(smooth_half)
     w = _box_smooth_profile(w_raw, half)
     w = np.maximum(w, 1.0)
     tgt = float(np.mean(w)) if target is None else float(target)
@@ -572,12 +809,7 @@ def _box_mean_2d(arr, half_y: int, half_x: int):
     kx = 2 * hx + 1
     y = np.arange(height)[:, None]
     x = np.arange(width)[None, :]
-    total = (
-        integral[y + ky, x + kx]
-        - integral[y, x + kx]
-        - integral[y + ky, x]
-        + integral[y, x]
-    )
+    total = integral[y + ky, x + kx] - integral[y, x + kx] - integral[y + ky, x] + integral[y, x]
     return (total / float(ky * kx)).astype(np.float32)
 
 
@@ -663,9 +895,7 @@ def detection_to_enhance_params(detection: int) -> dict[str, float]:
     """
     d = int(detection)
     if d < IR_DETECTION_MIN or d > IR_DETECTION_MAX:
-        raise ValueError(
-            f"detection must be {IR_DETECTION_MIN}..{IR_DETECTION_MAX}, got {detection}"
-        )
+        raise ValueError(f"detection must be {IR_DETECTION_MIN}..{IR_DETECTION_MAX}, got {detection}")
     t = d / float(IR_DETECTION_MAX)  # 0 at selective, 1 at legacy/hot
     lo = _IR_DET0_LO + t * (_IR_DET20_LO - _IR_DET0_LO)
     hi = _IR_DET0_HI + t * (_IR_DET20_HI - _IR_DET0_HI)
@@ -740,9 +970,7 @@ def estimate_ir_detection(ir_flat) -> int:
         fp = float(np.mean(strength[ghost_pool] >= 0.5)) if n_ghost else 0.0
         score = tp - 2.0 * fp
         # Prefer lower d on ties (fewer false positives).
-        if score > best_score + 1e-9 or (
-            abs(score - best_score) <= 1e-9 and d < best_d
-        ):
+        if score > best_score + 1e-9 or (abs(score - best_score) <= 1e-9 and d < best_d):
             best_score = score
             best_d = d
     return int(best_d)
@@ -798,13 +1026,9 @@ def enhance_ir_defect_contrast(
     base = base + (local - film) * (float(film_retain) * 0.35)
 
     sample = dip[center]
-    strength = _punch_strength(
-        dip, sample, float(dip_lo_percentile), float(dip_hi_percentile)
-    )
+    strength = _punch_strength(dip, sample, float(dip_lo_percentile), float(dip_hi_percentile))
     # Preserve already-crushed blacks (holder / prior zeros).
-    strength = np.maximum(
-        strength, np.clip((8000.0 - arr) / 8000.0, 0.0, 1.0)
-    )
+    strength = np.maximum(strength, np.clip((8000.0 - arr) / 8000.0, 0.0, 1.0))
     out = base * (1.0 - strength) + float(defect_floor) * strength
     return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
 
@@ -834,10 +1058,7 @@ def average_rgb16_columns(
                 off = base + c * plane + x * 2 if planar else base + x * 6 + 2 * c
                 sums[x][c] += int.from_bytes(raw[off : off + 2], "little")
     inv = 1.0 / float(lines)
-    return [
-        (int(round(s[0] * inv)), int(round(s[1] * inv)), int(round(s[2] * inv)))
-        for s in sums
-    ]
+    return [(int(round(s[0] * inv)), int(round(s[1] * inv)), int(round(s[2] * inv))) for s in sums]
 
 
 def channel_means_u16(
@@ -865,9 +1086,7 @@ def channel_means_u16(
         for i in range(pixels):
             base = i * 6
             for c in range(3):
-                sums[c] += int.from_bytes(
-                    strip[base + 2 * c : base + 2 * c + 2], "little"
-                )
+                sums[c] += int.from_bytes(strip[base + 2 * c : base + 2 * c + 2], "little")
     return (sums[0] / pixels, sums[1] / pixels, sums[2] / pixels)
 
 
@@ -900,9 +1119,7 @@ def build_measured_shading_table(
     declared_size: int | None = None,
 ) -> bytes:
     """Pack the second (measured-white) shading upload blob."""
-    dark_rows: Sequence[Sequence[int]] = (
-        constant_dark_from_columns(dark) if flatten_dark else dark
-    )
+    dark_rows: Sequence[Sequence[int]] = constant_dark_from_columns(dark) if flatten_dark else dark
     if declared_size is None:
         declared_size = declared_shading_size(len(white))
     return pack_shading_table(
@@ -910,6 +1127,7 @@ def build_measured_shading_table(
         white,
         declared_size=declared_size,
     )
+
 
 def pack_shading_table(
     dark: Sequence[Sequence[int]],
@@ -937,9 +1155,7 @@ def pack_shading_table(
             out += int(w[channel]).to_bytes(2, "little")
     if declared_size is not None:
         if len(out) > declared_size:
-            raise ValueError(
-                f"payload {len(out)} exceeds declared_size {declared_size}"
-            )
+            raise ValueError(f"payload {len(out)} exceeds declared_size {declared_size}")
         out.extend(b"\x00" * (declared_size - len(out)))
     return bytes(out)
 
@@ -971,35 +1187,11 @@ def make_unity_white_table(
     flatten_dark: bool = True,
 ) -> bytes:
     """First shading upload shape: measured dark, white fixed at ``0x2000``."""
-    dark_rows: Sequence[Sequence[int]] = (
-        constant_dark_from_columns(dark_rgb_per_pixel)
-        if flatten_dark
-        else dark_rgb_per_pixel
-    )
+    dark_rows: Sequence[Sequence[int]] = constant_dark_from_columns(dark_rgb_per_pixel) if flatten_dark else dark_rgb_per_pixel
     white = [(SHADING_UNITY_WHITE,) * 3] * len(dark_rows)
     if declared_size is None:
         declared_size = declared_shading_size(len(dark_rows))
     return pack_shading_table(dark_rows, white, declared_size=declared_size)
-
-
-def coarse_offsets_from_wide_means(
-    means: Sequence[float],
-    *,
-    divisor: int = AFE_OFFSET_COARSE_DIVISOR,
-    offset_max: int = AFE_OFFSET_MAX,
-) -> tuple[int, int, int]:
-    """Best-effort closed form from the capture wide-strip → coarse offset jump.
-
-    ``round((65535 - mean) / divisor)`` matches sessions 03/04 within a couple
-    of counts. Prefer :func:`run_afe_dichotomy` on hardware.
-    """
-    if len(means) != 3:
-        raise ValueError("means must be length-3 RGB")
-    out: list[int] = []
-    for mean in means:
-        code = int(round((65535.0 - float(mean)) / float(divisor)))
-        out.append(max(0, min(int(offset_max), code)))
-    return (out[0], out[1], out[2])
 
 
 def dichotomy_bracket_update(
@@ -1040,11 +1232,14 @@ def search_afe_codes(
     tolerance: float,
     code_increases_mean: bool,
     apply: Callable[[tuple[int, int, int]], tuple[float, float, float]],
+    code_min: int = 0,
 ) -> tuple[int, int, int]:
     """Dichotomy per RGB channel with a shared strip acquire via ``apply``."""
-    lows = [0, 0, 0]
-    highs = [int(code_max), int(code_max), int(code_max)]
-    codes = [max(0, min(int(code_max), int(v))) for v in initial]
+    lo0 = max(0, int(code_min))
+    hi0 = max(lo0, int(code_max))
+    lows = [lo0, lo0, lo0]
+    highs = [hi0, hi0, hi0]
+    codes = [max(lo0, min(hi0, int(v))) for v in initial]
     for _ in range(max(1, int(iterations))):
         means = apply((codes[0], codes[1], codes[2]))
         done = True
@@ -1060,7 +1255,7 @@ def search_afe_codes(
                 target,
                 code_increases_mean=code_increases_mean,
             )
-            codes[c] = max(0, min(int(code_max), int(codes[c])))
+            codes[c] = max(lo0, min(hi0, int(codes[c])))
         if done:
             break
     return (codes[0], codes[1], codes[2])

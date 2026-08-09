@@ -164,19 +164,34 @@ class Scanner:
         resolution: int = 1800,
         mode: ScanMode = "color",
         force: bool = False,
+        area: tuple[float, float, float, float] | None = None,
+        geometry: object | None = None,
     ) -> CalibEntry:
-        """Run dark/white shading (or IR white-only) and update the cache."""
+        """Run dark/white shading (or IR white-only) and update the cache.
+
+        GL128 AFE/ASIC shading runs with the motor disarmed, then re-arms so
+        the following image feed can move.
+        """
         self._ensure_scan_ready()
         self._ensure_open()
         if not self._asic._initialized:
             self._asic.init()
             if not self._asic.is_at_home():
                 self._asic.home()
-        return self._calibrator.run(
-            resolution=resolution,
-            mode=mode,
-            force=force,
-        )
+        was_armed = self._bringup_motor_armed
+        try:
+            if getattr(self._model, "asic", "") == "GL128":
+                self.disarm_bringup_motor()
+            return self._calibrator.run(
+                resolution=resolution,
+                mode=mode,
+                force=force,
+                area=area,
+                geometry=geometry,  # type: ignore[arg-type]
+            )
+        finally:
+            if was_armed:
+                self.arm_bringup_motor()
 
     def scan(
         self,
