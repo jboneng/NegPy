@@ -245,6 +245,7 @@ class PlustekBackend:
         dpi = int(params.dpi)
         capture_ir = bool(params.capture_ir)
         window = params.window
+        geometry = self._default_scan_geometry(scanner, dpi=dpi, window=window)
 
         _safe_progress(progress, 0.0)
         if cancel.is_set():
@@ -252,12 +253,20 @@ class PlustekBackend:
 
         try:
             if capture_ir:
-                rgb_image, ir_plane = self._scan_color_and_ir(scanner, dpi=dpi, window=window, progress=progress, cancel=cancel)
+                rgb_image, ir_plane = self._scan_color_and_ir(
+                    scanner,
+                    dpi=dpi,
+                    window=window,
+                    geometry=geometry,
+                    progress=progress,
+                    cancel=cancel,
+                )
             else:
                 rgb_image = scanner.scan(
                     resolution=dpi,
                     mode="color",
-                    area=window,
+                    area=None if geometry is not None else window,
+                    geometry=geometry,
                     progress=progress,
                     cancel=cancel,
                 )
@@ -278,12 +287,33 @@ class PlustekBackend:
             ir_valid_mask=None,
         )
 
+    @staticmethod
+    def _default_scan_geometry(
+        scanner: Scanner,
+        *,
+        dpi: int,
+        window: tuple[float, float, float, float] | None,
+    ) -> object | None:
+        """Lab Full-window geometry for SE when no explicit crop is set."""
+        if window is not None:
+            return None
+        from negpy.infrastructure.scanners.plustek.scan.bringup import (
+            bringup_scan_geometry,
+            is_opticfilm_8200i_se,
+        )
+
+        if not is_opticfilm_8200i_se(scanner.model):
+            return None
+        geometry, _meta = bringup_scan_geometry(scanner.model, dpi, profile="preview_safe")
+        return geometry
+
     def _scan_color_and_ir(
         self,
         scanner: Scanner,
         *,
         dpi: int,
         window: tuple[float, float, float, float] | None,
+        geometry: object | None,
         progress: Callable[[float], None],
         cancel: threading.Event,
     ) -> tuple[Any, np.ndarray]:
@@ -296,10 +326,12 @@ class PlustekBackend:
         if cancel.is_set():
             raise RuntimeError("Scan cancelled before start")
 
+        scan_area = None if geometry is not None else window
         color = scanner.scan(
             resolution=dpi,
             mode="color",
-            area=window,
+            area=scan_area,
+            geometry=geometry,
             progress=color_progress,
             cancel=cancel,
         )
@@ -309,7 +341,8 @@ class PlustekBackend:
         ir_img = scanner.scan(
             resolution=dpi,
             mode="infrared",
-            area=window,
+            area=scan_area,
+            geometry=geometry,
             progress=ir_progress,
             cancel=cancel,
         )

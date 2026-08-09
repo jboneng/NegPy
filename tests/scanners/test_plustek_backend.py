@@ -213,6 +213,37 @@ def test_capture_ir_returns_ir_plane(monkeypatch):
     assert scanner.scan.call_count == 2
 
 
+def test_default_se_scan_passes_preview_safe_geometry(monkeypatch):
+    """window=None must not use bare area=None (feed2=13704 motor-gate failure)."""
+    _patch_enum(monkeypatch)
+    scanner = _fake_scanner()
+    monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
+    PlustekBackend().scan(_DEVICE_ID, _params(dpi=1200), lambda _: None, threading.Event())
+    assert scanner.scan.call_count >= 1
+    kwargs = scanner.scan.call_args.kwargs
+    assert kwargs.get("geometry") is not None
+    assert kwargs.get("area") is None
+    assert kwargs["geometry"].lincnt_register == 4836
+    feed2 = scanner.model.feed_to_scan_steps_for_area(kwargs["geometry"].area)
+    assert feed2 == 13128
+
+
+def test_explicit_window_skips_preview_safe_geometry(monkeypatch):
+    _patch_enum(monkeypatch)
+    scanner = _fake_scanner()
+    monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
+    window = (0.1, 0.1, 0.9, 0.5)
+    PlustekBackend().scan(
+        _DEVICE_ID,
+        _params(dpi=1200, window=window),
+        lambda _: None,
+        threading.Event(),
+    )
+    kwargs = scanner.scan.call_args.kwargs
+    assert kwargs.get("geometry") is None
+    assert kwargs.get("area") == window
+
+
 def test_open_session_shape(monkeypatch):
     _patch_enum(monkeypatch)
     scanner = _fake_scanner()
