@@ -18,6 +18,9 @@ logger = get_logger(__name__)
 HOST_CALIB_PEAK_PERCENTILE = 99.7
 HOST_CALIB_PEAK_TARGET = 0xF000
 HOST_CALIB_PEAK_TRIGGER = 0.85
+#: Drop this fraction from each edge when estimating film highlights / clamping
+#: holder chrome so NegPy auto bounds do not latch onto Full-window margins.
+HOST_CALIB_BORDER_INSET = 0.04
 
 
 class ImagePipeline:
@@ -25,6 +28,18 @@ class ImagePipeline:
 
     def __init__(self, model: FilmModel = MODEL_8200I) -> None:
         self.model = model
+
+    @staticmethod
+    def _inset_slice(h: int, w: int, inset: float) -> tuple[slice, slice] | None:
+        """Return ``(ys, xs)`` for a centered inset, or ``None`` if too small."""
+        frac = min(max(float(inset), 0.0), 0.2)
+        if frac <= 0 or h < 8 or w < 8:
+            return None
+        cut_h = max(1, int(round(h * frac)))
+        cut_w = max(1, int(round(w * frac)))
+        if cut_h * 2 >= h or cut_w * 2 >= w:
+            return None
+        return slice(cut_h, h - cut_h), slice(cut_w, w - cut_w)
 
     def decode_rgb(
         self,
@@ -162,6 +177,48 @@ class ImagePipeline:
         logger.debug("applied y stagger shifts=%s", shifts)
         return out
 
+    def clamp_host_calib_border_highlights(
+        self,
+        rgb: np.ndarray,
+        *,
+        inset: float = HOST_CALIB_BORDER_INSET,
+        peak_percentile: float = HOST_CALIB_PEAK_PERCENTILE,
+    ) -> np.ndarray:
+        """Pull Full-window holder chrome down to the film-window highlight peak.
+
+        NegPy auto Dmin/bounds treat near-white negative margins as film base;
+        chrome brighter than the framed film makes the positive too dark until
+        the user crops. Interior pixels are unchanged.
+        """
+        if rgb.ndim != 3 or rgb.shape[2] != 3:
+            raise ValueError(f"rgb must be HxWx3, got {rgb.shape}")
+        h, w, _ = rgb.shape
+        region = self._inset_slice(h, w, inset)
+        if region is None:
+            return rgb
+        ys, xs = region
+        inset_peak = float(np.percentile(rgb[ys, xs], float(peak_percentile)))
+        if inset_peak <= 0:
+            return rgb
+        border = np.ones((h, w), dtype=bool)
+        border[ys, xs] = False
+        if not border.any():
+            return rgb
+        out = rgb.astype(np.float32, copy=True)
+        hot = border & (out.max(axis=2) > inset_peak)
+        if not hot.any():
+            return rgb
+        out[hot] = np.minimum(out[hot], inset_peak)
+        n_hot = int(hot.sum())
+        logger.info(
+            "host calib border highlight clamp inset=%.2f peak_p%.1f=%.0f pixels=%d",
+            float(inset),
+            float(peak_percentile),
+            inset_peak,
+            n_hot,
+        )
+        return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
+
     def apply_host_calib(
         self,
         rgb: np.ndarray,
@@ -177,6 +234,8 @@ class ImagePipeline:
         chrome strip. Mapping that strip to 65535 leaves the film window dark when
         scan-position light is lower than home — NegPy then meters a thin-looking
         positive. A percentile makeup brings frame highlights up to ``peak_target``.
+        Border chrome brighter than the film inset is then clamped so auto bounds
+        do not latch onto holder margins.
         """
         if dark.shape != white.shape:
             raise ValueError(f"dark/white shape mismatch: {dark.shape} vs {white.shape}")
@@ -206,7 +265,10 @@ class ImagePipeline:
 
         target = int(peak_target)
         if target > 0:
-            peak = float(np.percentile(out, float(peak_percentile)))
+            h, w, _ = out.shape
+            region = self._inset_slice(h, w, HOST_CALIB_BORDER_INSET)
+            sample = out[region[0], region[1]] if region is not None else out
+            peak = float(np.percentile(sample, float(peak_percentile)))
             trigger = float(target) * float(HOST_CALIB_PEAK_TRIGGER)
             if peak > 1.0 and peak < trigger:
                 gain = float(target) / peak
@@ -219,7 +281,10 @@ class ImagePipeline:
                     target,
                 )
 
-        return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
+        stretched = np.clip(np.rint(out), 0, 65535).astype(np.uint16)
+        return self.clamp_host_calib_border_highlights(
+            stretched, peak_percentile=peak_percentile
+        )
 
     def assemble(
         self,

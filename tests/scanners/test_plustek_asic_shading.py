@@ -866,3 +866,20 @@ def test_host_calib_exposure_makeup_lifts_dim_film_window():
     assert peak >= HOST_CALIB_PEAK_TARGET * 0.95
     # Midtones must lift with the peak (not only clip edges).
     assert float(np.median(out)) > 20000
+
+
+def test_host_calib_border_clamp_caps_hot_margins():
+    """Holder chrome brighter than film inset must not stay above film peak."""
+    from negpy.infrastructure.scanners.plustek.scan.pipeline import ImagePipeline
+
+    pipe = ImagePipeline(MODEL_8200I_SE)
+    h, w = 100, 100
+    rgb = np.full((h, w, 3), 20000, dtype=np.uint16)
+    rgb[10:90, 10:90, :] = 25000
+    rgb[:4, :, :] = 65535
+    rgb[-4:, :, :] = 65535
+    rgb[:, :4, :] = 65535
+    rgb[:, -4:, :] = 65535
+    out = pipe.clamp_host_calib_border_highlights(rgb)
+    assert int(out[:4].max()) <= int(out[10:90, 10:90].max())
+    assert int(out[40:60, 40:60].mean()) == 25000
