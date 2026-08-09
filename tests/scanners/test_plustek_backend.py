@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import sys
 import threading
+import types
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -40,7 +42,16 @@ def _info() -> UsbDeviceInfo:
     )
 
 
+def _stub_pyusb(monkeypatch) -> None:
+    """Satisfy PlustekBackend.__init__ without the optional plustek group (CI)."""
+    usb = types.ModuleType("usb")
+    usb.core = types.ModuleType("usb.core")
+    monkeypatch.setitem(sys.modules, "usb", usb)
+    monkeypatch.setitem(sys.modules, "usb.core", usb.core)
+
+
 def _patch_enum(monkeypatch, devices: list[UsbDeviceInfo] | None = None) -> None:
+    _stub_pyusb(monkeypatch)
     devices = devices if devices is not None else [_info()]
     monkeypatch.setattr(f"{_BACKEND}.find_devices", lambda supported_only=True: list(devices))
     monkeypatch.setattr(f"{_BACKEND}.list_devices", lambda: list(devices))
@@ -136,17 +147,21 @@ def test_refresh_devices_re_enumerates(monkeypatch):
     assert backend.refresh_devices() == backend.list_devices()
 
 
-def test_eject_returns_false():
+def test_eject_returns_false(monkeypatch):
+    _stub_pyusb(monkeypatch)
     assert PlustekBackend().eject(_DEVICE_ID) is False
 
 
 def test_unavailable_without_pyusb(monkeypatch):
     import builtins
 
+    monkeypatch.delitem(sys.modules, "usb", raising=False)
+    monkeypatch.delitem(sys.modules, "usb.core", raising=False)
+
     real_import = builtins.__import__
 
     def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "usb.core" or (name == "usb" and fromlist):
+        if name == "usb.core" or name == "usb" or (name == "usb" and fromlist):
             raise ImportError("simulated missing pyusb")
         return real_import(name, globals, locals, fromlist, level)
 
