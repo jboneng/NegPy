@@ -33,6 +33,8 @@ class ScanSidebar(QWidget):
         self._devices: list[ScannerDevice] = []
         self._scanning = False
         self._devices_loaded = False
+        self._caps_autofocus = False
+        self._caps_auto_exposure = False
         self._init_ui()
         self._connect_signals()
 
@@ -141,10 +143,12 @@ class ScanSidebar(QWidget):
         self.autofocus_check.setChecked(True)
         self.autofocus_check.setToolTip("Autofocus before scanning (film is rarely perfectly flat)")
         self.form.addRow(self.autofocus_check)
+        self.autofocus_check.setVisible(False)
 
         self.ae_check = QCheckBox("Auto-exposure")
         self.ae_check.setToolTip("Meter exposure in hardware before the scan")
         self.form.addRow(self.ae_check)
+        self.ae_check.setVisible(False)
 
         # Scan exposure time (SANE `scan-exposure-time`), shown only when the
         # device reports a usable range. Slider in microseconds; label shows
@@ -376,6 +380,10 @@ class ScanSidebar(QWidget):
             self.frame_range_widget.setVisible(False)
             self.exposure_label.setVisible(False)
             self.exposure_row_widget.setVisible(False)
+            self.autofocus_check.setVisible(False)
+            self.ae_check.setVisible(False)
+            self._caps_autofocus = False
+            self._caps_auto_exposure = False
             return
 
         caps = device.capabilities
@@ -438,9 +446,22 @@ class ScanSidebar(QWidget):
             self.ir_check.setChecked(False)
             self.ir_check.setToolTip("IR scanning not supported by this device")
 
-        # Auto-exposure
-        self.ae_check.setEnabled(caps.auto_exposure)
-        if caps.auto_exposure:
+        # Autofocus / Auto-exposure — shown only when the device reports them.
+        self._caps_autofocus = bool(caps.autofocus)
+        self._caps_auto_exposure = bool(caps.auto_exposure)
+        self.autofocus_check.blockSignals(True)
+        self.autofocus_check.setVisible(self._caps_autofocus)
+        if self._caps_autofocus:
+            self.autofocus_check.setChecked(self._settings.autofocus)
+            self.autofocus_check.setToolTip(
+                "Autofocus before scanning (film is rarely perfectly flat)"
+            )
+        else:
+            self.autofocus_check.setChecked(False)
+        self.autofocus_check.blockSignals(False)
+
+        self.ae_check.setVisible(self._caps_auto_exposure)
+        if self._caps_auto_exposure:
             self.ae_check.setChecked(self._settings.auto_exposure)
             self.ae_check.setToolTip("Meter exposure in hardware before the scan")
         else:
@@ -609,8 +630,8 @@ class ScanSidebar(QWidget):
         dpi = int(self.dpi_combo.currentData() or self.dpi_combo.currentText() or 3600)
         depth = int(self.depth_combo.currentData() or 16)
         capture_ir = self.ir_check.isEnabled() and self.ir_check.isChecked()
-        autofocus = self.autofocus_check.isChecked()
-        auto_exposure = self.ae_check.isEnabled() and self.ae_check.isChecked()
+        autofocus = self._caps_autofocus and self.autofocus_check.isChecked()
+        auto_exposure = self._caps_auto_exposure and self.ae_check.isChecked()
         pattern = self.pattern_edit.text().strip() or '{{ date }}_{{ "%03d" % seq }}'
         fmt = self.fmt_combo.currentText()
 
@@ -752,8 +773,8 @@ class ScanSidebar(QWidget):
             dpi=dpi,
             depth=depth,
             capture_ir=self.ir_check.isChecked() and self.ir_check.isEnabled(),
-            autofocus=self.autofocus_check.isChecked(),
-            auto_exposure=self.ae_check.isChecked() and self.ae_check.isEnabled(),
+            autofocus=self._caps_autofocus and self.autofocus_check.isChecked(),
+            auto_exposure=self._caps_auto_exposure and self.ae_check.isChecked(),
             exposure_time_us=(self.exposure_slider.value() if self.exposure_row_widget.isVisible() else None),
             frame_from=self.frame_from_spin.value(),
             frame_to=self.frame_to_spin.value(),

@@ -26,7 +26,7 @@ _BACKEND = "negpy.infrastructure.scanners.plustek_backend"
 
 
 def _params(**kwargs) -> ScanParams:
-    base = dict(dpi=1800, depth=16, capture_ir=False)
+    base = dict(dpi=1800, depth=16, capture_ir=False, autofocus=False)
     base.update(kwargs)
     return ScanParams(**base)
 
@@ -126,6 +126,8 @@ def test_backend_list_devices_maps_caps(monkeypatch):
     assert dev.capabilities.can_eject is False
     assert dev.capabilities.exposure_time_us is None
     assert dev.capabilities.ir_channel is True
+    assert dev.capabilities.auto_exposure is False
+    assert dev.capabilities.autofocus is False
 
 
 def test_refresh_devices_re_enumerates(monkeypatch):

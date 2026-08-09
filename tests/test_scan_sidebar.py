@@ -37,6 +37,7 @@ FULL_CAPS = ScannerCapabilities(
     sources=(ScanMode.NEGATIVE,),
     max_area_mm=(36.0, 24.0),
     auto_exposure=True,
+    autofocus=True,
     adapter_frame_capacity=40,
     adapter_frame_control=True,
     can_eject=True,
@@ -51,6 +52,7 @@ LS50_CAPS = ScannerCapabilities(
     sources=(ScanMode.NEGATIVE,),
     max_area_mm=(25.0571, 37.83965),
     auto_exposure=True,
+    autofocus=True,
     adapter_frame_capacity=6,
     adapter_frame_control=True,
     can_eject=True,
@@ -138,12 +140,15 @@ def test_no_device_disables_controls() -> None:
     assert sidebar.scan_btn.isEnabled() is False
     assert sidebar.eject_btn.isVisibleTo(sidebar) is False
     assert sidebar.frame_range_widget.isVisibleTo(sidebar) is False
+    assert sidebar.ae_check.isVisibleTo(sidebar) is False
+    assert sidebar.autofocus_check.isVisibleTo(sidebar) is False
 
 
 def test_full_capability_device_enables_coolscan_controls() -> None:
     sidebar, _ = _sidebar(FULL_DEVICE)
     assert sidebar.ir_check.isEnabled() is True
-    assert sidebar.ae_check.isEnabled() is True
+    assert sidebar.ae_check.isVisibleTo(sidebar) is True
+    assert sidebar.autofocus_check.isVisibleTo(sidebar) is True
     assert sidebar.eject_btn.isVisibleTo(sidebar) is True
     assert sidebar.frame_range_widget.isVisibleTo(sidebar) is True
     assert sidebar.frame_from_spin.maximum() == 40
@@ -155,7 +160,8 @@ def test_minimal_device_hides_coolscan_controls() -> None:
     # controls and still scans.
     sidebar, _ = _sidebar(MINIMAL_DEVICE)
     assert sidebar.ir_check.isEnabled() is False
-    assert sidebar.ae_check.isEnabled() is False
+    assert sidebar.ae_check.isVisibleTo(sidebar) is False
+    assert sidebar.autofocus_check.isVisibleTo(sidebar) is False
     assert sidebar.eject_btn.isVisibleTo(sidebar) is False
     assert sidebar.frame_range_widget.isVisibleTo(sidebar) is False
     assert sidebar.scan_btn.isEnabled() is True
@@ -339,3 +345,16 @@ def test_ae_flag_flows_into_scan_params() -> None:
     _kind, req = controller.started[0]
     assert req.params.auto_exposure is True
     assert req.params.autofocus is True
+
+
+def test_unsupported_ae_af_forced_off_in_scan_params() -> None:
+    sidebar, controller = _sidebar(MINIMAL_DEVICE)
+    sidebar.folder_edit.setText("/tmp/negpy-scan-out")
+    sidebar.ae_check.setChecked(True)
+    sidebar.autofocus_check.setChecked(True)
+
+    sidebar._on_scan()
+
+    _kind, req = controller.started[0]
+    assert req.params.auto_exposure is False
+    assert req.params.autofocus is False

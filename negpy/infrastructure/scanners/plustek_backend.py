@@ -42,6 +42,7 @@ def _caps_for(model: Any) -> ScannerCapabilities:
         sources=(ScanMode.TRANSPARENCY,),
         max_area_mm=model.max_area_mm,
         auto_exposure=False,
+        autofocus=False,
         adapter_frame_capacity=None,
         adapter_frame_control=False,
         can_eject=False,
@@ -87,6 +88,8 @@ def _validate_params(params: ScanParams, *, model: Any | None = None) -> None:
         raise RuntimeError(f"Frame {params.frame} requested but the device has no frame-selection option")
     if params.auto_exposure:
         raise RuntimeError("Auto-exposure requested but the device has no 'ae' option")
+    if params.autofocus:
+        raise RuntimeError("Autofocus requested but the device has no autofocus option")
     if params.capture_ir and model is not None and getattr(model, "supports_infrared", None) is False:
         raise RuntimeError(f"{getattr(model, 'model', 'device')} does not support infrared")
 
