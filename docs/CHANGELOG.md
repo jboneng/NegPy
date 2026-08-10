@@ -2,7 +2,6 @@
 
 ## 0.48.1
 
-- New: **Plustek Prescan** — on the OpticFilm 8200i SE, Prescan grabs a 1200 dpi full-window preview so you can set a hardware crop before the final scan.
 - New: **Printing Notes** — Export tab previews a marked-up work print on canvas (Shift+N) and writes it as `<stem>_notes.jpg`: burns hatched, dodges open, masks badged in stops, print recipe below. Normal exports aren't annotated.
 - New: **Local Grade per dodge/burn mask** — each mask can print at its own contrast, in ISO-R points off the frame's Grade. Burn a sky in through a harder filter.
 - Change: **Dodge/burn now in stops** — the mask slider is "Burn", ±2 stops, default 0; positive burns, negative dodges. Old saves migrate.
