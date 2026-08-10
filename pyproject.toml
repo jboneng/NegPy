@@ -25,6 +25,8 @@ dependencies = [
     "qtawesome==1.4.2",
     "wgpu==0.31.1",
     "pyserial>=3.5",
+    "pyusb>=1.2.1",
+    "libusb-package>=1.0.26 ; sys_platform == 'win32'",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -54,12 +56,6 @@ camera = [
     # Tethered camera scanning. libgphoto2 has no Windows build, so the wheels — and the
     # Camera Scanning tab with them — are macOS and Linux only.
     "gphoto2>=2.5 ; sys_platform != 'win32'",
-]
-# In-tree Plustek USB driver (OpticFilm 8200i SE). Source lives under
-# negpy/infrastructure/scanners/plustek/; this group only pulls PyUSB + bundled libusb.
-plustek = [
-    "pyusb>=1.2.1",
-    "libusb-package>=1.0.26",
 ]
 
 [project.urls]

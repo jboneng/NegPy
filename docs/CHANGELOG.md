@@ -2,7 +2,7 @@
 
 ## 0.48.1
 
-- New: **Plustek USB scanner backend** — Scan tab Backend **Plustek (USB)** drives the OpticFilm 8200i SE via an in-tree USB driver (Windows/macOS/Linux). Windows no longer shows a scanner placeholder; default backend on Windows is Plustek. Optional `plustek` group installs PyUSB/libusb; WinUSB binding required on Windows ([PLUSTEK_WINDOWS.md](PLUSTEK_WINDOWS.md)).
+- New: **Plustek USB scanner backend** — Scan tab Backend **Plustek (USB)** drives the OpticFilm 8200i SE via an in-tree USB driver (Windows/macOS/Linux). Windows no longer shows a scanner placeholder; default backend on Windows is Plustek. PyUSB is a core dependency; Windows also ships `libusb-package` in release builds. WinUSB binding required on Windows ([PLUSTEK_WINDOWS.md](PLUSTEK_WINDOWS.md)).
 - New: **Printing Notes** — Export tab previews a marked-up work print on canvas (Shift+N) and writes it as `<stem>_notes.jpg`: burns hatched, dodges open, masks badged in stops, print recipe below. Normal exports aren't annotated.
 - New: **Local Grade per dodge/burn mask** — each mask can print at its own contrast, in ISO-R points off the frame's Grade. Burn a sky in through a harder filter.
 - Change: **Dodge/burn now in stops** — the mask slider is "Burn", ±2 stops, default 0; positive burns, negative dodges. Old saves migrate.

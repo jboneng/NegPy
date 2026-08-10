@@ -61,6 +61,20 @@ params = [
     # Camera scanning: see collect_gphoto2_plugins() — the plugin trees need their
     # directory layout preserved, which --collect-all does not do.
     *([] if is_windows else ["--collect-all=gphoto2"]),
+    # Plustek USB: ship PyUSB + bundled libusb on Windows only. Linux/macOS use
+    # host libusb via PyUSB (same stack SANE needs); leave package_linux strip alone.
+    *(
+        [
+            "--hidden-import=usb",
+            "--hidden-import=usb.core",
+            "--hidden-import=usb.backend.libusb1",
+            "--hidden-import=libusb_package",
+            "--collect-all=usb",
+            "--collect-all=libusb_package",
+        ]
+        if is_windows
+        else []
+    ),
     # Exclude unused modules
     # Metadata
     "--copy-metadata=imageio",

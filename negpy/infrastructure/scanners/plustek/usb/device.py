@@ -107,7 +107,7 @@ def _require_usb():
         import usb.util
     except ImportError as exc:
         raise DeviceNotFoundError(
-            "PyUSB is not available. Install with: uv sync --group plustek"
+            "PyUSB is not available. Reinstall NegPy dependencies (pyusb is required)."
         ) from exc
 
     # Bundled libusb-1.0 for Windows/macOS when system libusb is not on PATH.

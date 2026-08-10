@@ -32,11 +32,7 @@ Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if you hav
     brew install sane-backends
     ```
 
-- **Plustek USB** (Windows/macOS/Linux) — in-tree OpticFilm 8200i SE driver under `negpy/infrastructure/scanners/plustek/`. Pull PyUSB + libusb with:
-  ```bash
-  uv sync --group plustek
-  ```
-  On Windows, bind WinUSB with Zadig for USB id `07b3:1825` before scanning (vendor/SilverFast drivers conflict). See [docs/PLUSTEK_WINDOWS.md](docs/PLUSTEK_WINDOWS.md).
+- **Plustek USB** (Windows/macOS/Linux) — in-tree OpticFilm 8200i SE driver under `negpy/infrastructure/scanners/plustek/`. PyUSB is a core dependency; Windows also installs `libusb-package` (bundled in release builds). On Windows, bind WinUSB with Zadig for USB id `07b3:1825` before scanning (vendor/SilverFast drivers conflict). See [docs/PLUSTEK_WINDOWS.md](docs/PLUSTEK_WINDOWS.md).
 
 
 ### 2. Python Environment

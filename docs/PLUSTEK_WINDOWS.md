@@ -7,7 +7,7 @@ NegPy’s in-tree Plustek USB driver talks to the OpticFilm **8200i SE** over ra
 - Windows 10/11
 - OpticFilm **8200i SE** (`07B3:1825`, GL128) — the only model validated for scan
 - WinUSB (or libusbK) bound via [Zadig](https://zadig.akeo.ie/)
-- From a NegPy source checkout: `uv sync --group plustek` (pulls `pyusb` and `libusb-package`)
+- NegPy with its normal dependencies (`pyusb` is core; Windows also ships `libusb-package`)
 
 ## 1. Confirm the device
 
@@ -27,15 +27,17 @@ With the scanner powered and plugged in:
 
 While WinUSB is bound, Plustek’s stock Windows scanning apps will not see the device.
 
-## 3. Install USB support in NegPy
+## 3. Run NegPy and scan
+
+From a source checkout:
 
 ```powershell
 cd path\to\NegPy
-uv sync --group plustek
+uv sync
 make run
 ```
 
-In the Scan tab, Backend should be **Plustek (USB)**. Refresh the device list; the SE should appear when WinUSB is bound.
+Or use a Windows release build (PyUSB and libusb are bundled). In the Scan tab, Backend should be **Plustek (USB)**. Refresh the device list; the SE should appear when WinUSB is bound.
 
 ## 4. Restoring the vendor driver
 
@@ -51,7 +53,7 @@ In the Scan tab, Backend should be **Plustek (USB)**. Refresh the device list; t
 | Empty device list | Wrong PID, unplugged, or still on vendor driver |
 | `DriverBindingError` / access denied | WinUSB not bound; another app has the handle |
 | `UsbError` / link failures | Cable/hub; try a direct motherboard port |
-| Missing PyUSB hint in the UI | Run `uv sync --group plustek` |
+| UI hints at missing USB / PyUSB | Broken install — reinstall NegPy; Windows builds ship PyUSB + libusb |
 | First scan at a DPI takes a few seconds | Normal — AFE + one dark + one white shading strip (same choreography as SilverFast), then cached per resolution |
 | ASIC shading ready (preferred) | Log shows colour white mean ~11–13k after unity, then `ASIC shading ready`, image `shading=True` / DVDSET on. Delete `plustek_calib` and rescan after driver changes so calib is remeasured |
 | White strip still raw (~55k) after DVDSET | HW post-unity reshape did not run — host path used. Check white START (`0x01=0x23`, `0x02` has `MTRPWR`, dpi clocks). Do not arm fake ~12k whites |

@@ -43,7 +43,7 @@ def _info() -> UsbDeviceInfo:
 
 
 def _stub_pyusb(monkeypatch) -> None:
-    """Satisfy PlustekBackend.__init__ without the optional plustek group (CI)."""
+    """Satisfy PlustekBackend.__init__ when usb.core is unavailable (defense-in-depth)."""
     usb = types.ModuleType("usb")
     usb.core = types.ModuleType("usb.core")
     monkeypatch.setitem(sys.modules, "usb", usb)

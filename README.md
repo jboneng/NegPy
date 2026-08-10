@@ -116,7 +116,7 @@ brew install libgphoto2
 1. Run the installer (ignore the warnings)
 2. Start the app and click through the warnings.
 
-**Scanner support (Plustek OpticFilm 8200i SE)** uses NegPy’s in-tree USB driver. Bind the scanner to WinUSB with [Zadig](https://zadig.akeo.ie/) (replace the vendor/SilverFast driver for `07b3:1825`), then install the optional group when building from source (`uv sync --group plustek`). See [docs/PLUSTEK_WINDOWS.md](docs/PLUSTEK_WINDOWS.md). Only the 8200i SE is scan-ready today. Camera scanning is still unavailable on Windows (libgphoto2 has no Windows build).
+**Scanner support (Plustek OpticFilm 8200i SE)** uses NegPy’s in-tree USB driver. Bind the scanner to WinUSB with [Zadig](https://zadig.akeo.ie/) (replace the vendor/SilverFast driver for `07b3:1825`). PyUSB is included with NegPy; Windows builds also ship a bundled libusb. See [docs/PLUSTEK_WINDOWS.md](docs/PLUSTEK_WINDOWS.md). Only the 8200i SE is scan-ready today. Camera scanning is still unavailable on Windows (libgphoto2 has no Windows build).
 
 ---
 

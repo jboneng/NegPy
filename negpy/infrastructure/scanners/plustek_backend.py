@@ -148,7 +148,8 @@ class PlustekBackend:
             import usb.core  # noqa: F401
         except ImportError as exc:
             raise ScannerUnavailable(
-                "Plustek USB needs PyUSB. Install with `uv sync --group plustek`. "
+                "Plustek USB needs PyUSB. Reinstall NegPy dependencies "
+                "(pyusb is a core dependency). "
                 "On Windows, bind WinUSB with Zadig for OpticFilm 8200i SE (07b3:1825) — "
                 "see docs/PLUSTEK_WINDOWS.md."
             ) from exc

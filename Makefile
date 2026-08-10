@@ -9,13 +9,13 @@ all: format lint type test
 .PHONY: install
 install:
 	@echo "Installing dependencies with uv..."
-	@uv sync --all-groups --no-group plustek
+	@uv sync --all-groups
 
 # Sync dependencies
 .PHONY: sync
 sync:
 	@echo "Syncing dependencies with uv..."
-	@uv sync --all-groups --no-group plustek
+	@uv sync --all-groups
 
 # Lint checks (ruff)
 .PHONY: lint
