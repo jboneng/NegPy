@@ -43,6 +43,7 @@ def _caps_for(model: Any) -> ScannerCapabilities:
         max_area_mm=model.max_area_mm,
         auto_exposure=False,
         autofocus=False,
+        prescan=bool(getattr(model, "scan_ready", False)),
         adapter_frame_capacity=None,
         adapter_frame_control=False,
         can_eject=False,
@@ -377,16 +378,18 @@ class PlustekBackend:
         dpi: int,
         window: tuple[float, float, float, float] | None,
     ) -> object | None:
-        """Lab Full-window geometry for SE when no explicit crop is set."""
-        if window is not None:
-            return None
+        """Lab Full-window or crop geometry for SE (forced geometry into scan)."""
         from negpy.infrastructure.scanners.plustek.scan.bringup import (
             bringup_scan_geometry,
+            crop_scan_geometry,
             is_opticfilm_8200i_se,
         )
 
         if not is_opticfilm_8200i_se(scanner.model):
             return None
+        if window is not None:
+            geometry, _meta = crop_scan_geometry(scanner.model, dpi, window)
+            return geometry
         geometry, _meta = bringup_scan_geometry(scanner.model, dpi, profile="preview_safe")
         return geometry
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import lcm
 
 from negpy.infrastructure.scanners.plustek.device.model_8200i import MODEL_8200I
 from negpy.infrastructure.scanners.plustek.device.protocol import FilmModel
@@ -207,12 +208,15 @@ def _geometry_from_mm(
     output_startx = startx + offset
     optical_res = model.optical_resolution
     optical_pixels = pixels * optical_res // asic_dpi
-    # SE: keep native span on a multiple of 4 so output width stays coherent when
-    # ``7200/dpi`` is odd (1440 → factor 5). Odd widths scramble the USB rows into
-    # a diagonal grid (session 13 spans are always % 4 == 0).
+    # SE: keep native span coherent with USB line length. Session 13 spans are
+    # always % 4 == 0; at factor 4 (1800 dpi) that alone still allows odd output
+    # widths (e.g. 2455), which shear ~1 px/row into a diamond. Also require an
+    # even pixel count via lcm(span_align, 2*factor).
     span_align = int(getattr(model, "optical_span_alignment", 0) or 0)
     if span_align > 1 and optical_pixels >= span_align:
-        optical_pixels = (optical_pixels // span_align) * span_align
+        factor = max(1, optical_res // asic_dpi)
+        align = lcm(span_align, 2 * factor)
+        optical_pixels = (optical_pixels // align) * align
         pixels = max(1, optical_pixels * asic_dpi // optical_res)
         optical_pixels = pixels * optical_res // asic_dpi
     pixel_startx = output_startx * optical_res // asic_dpi

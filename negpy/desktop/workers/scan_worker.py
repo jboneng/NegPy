@@ -34,6 +34,13 @@ class RollPreviewRequest:
 
 
 @dataclass(frozen=True)
+class PrescanRequest:
+    """One low-DPI full-window colour preview for crop setup (no file write)."""
+
+    device_id: str
+
+
+@dataclass(frozen=True)
 class BatchRequest:
     """Scan an explicit set of frames, one SANE session each, frame-numbered output."""
 
@@ -63,6 +70,8 @@ class ScanWorker(QObject):
     eject_error = pyqtSignal(str)
     roll_preview_ready = pyqtSignal(object)  # roll preview: one RollPreview per slot
     roll_preview_finished = pyqtSignal()  # the whole strip is done (also after a failed slot)
+    prescan_ready = pyqtSignal(object)  # ScanResult RGB preview (no file written)
+    prescan_error = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -300,6 +309,56 @@ class ScanWorker(QObject):
             self.error.emit(payload or "Unknown scan error")
         else:
             self.roll_preview_finished.emit()
+
+    @pyqtSlot(PrescanRequest)
+    def run_prescan(self, req: PrescanRequest) -> None:
+        """Full-window colour preview at PRESCAN_DPI; emit RGB without writing a file."""
+        from negpy.infrastructure.scanners.plustek.scan.bringup import PRESCAN_DPI
+
+        with self._state_lock:
+            if not self._request_prepared:
+                self._cancel_event.clear()
+            self._request_prepared = False
+            self._scanning = True
+
+        outcome: tuple[str, object | None] = ("finished", None)
+        try:
+            if self._cancel_event.is_set():
+                outcome = ("cancelled", None)
+            else:
+                service = self._ensure_service()
+                params = ScanParams(
+                    dpi=PRESCAN_DPI,
+                    depth=16,
+                    capture_ir=False,
+                    autofocus=False,
+                    auto_exposure=False,
+                    window=None,
+                )
+                result = service.run_scan(
+                    req.device_id,
+                    params,
+                    self.progress.emit,
+                    self._cancel_event,
+                )
+                if self._cancel_event.is_set():
+                    outcome = ("cancelled", None)
+                else:
+                    outcome = ("finished", result)
+        except Exception as error:
+            logger.exception("Prescan failed")
+            outcome = ("cancelled", None) if self._cancel_event.is_set() else ("error", str(error))
+        finally:
+            with self._state_lock:
+                self._scanning = False
+
+        kind, payload = outcome
+        if kind == "cancelled":
+            self.cancelled.emit()
+        elif kind == "error":
+            self.prescan_error.emit(str(payload or "Unknown prescan error"))
+        else:
+            self.prescan_ready.emit(payload)
 
     def prepare_scan(self) -> None:
         """Arm one queued scan without losing a Stop pressed before it starts."""

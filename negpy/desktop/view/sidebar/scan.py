@@ -211,6 +211,25 @@ class ScanSidebar(QWidget):
         self.scan_window_widget.setVisible(False)
         self.scan_window_status.setVisible(False)
 
+        # Prescan + crop (Plustek SE): low-DPI full window → interactive crop → scan_window.
+        self.prescan_widget = QWidget()
+        prescan_row = QHBoxLayout(self.prescan_widget)
+        prescan_row.setContentsMargins(0, 0, 0, 0)
+        self.prescan_btn = QPushButton("Prescan…")
+        self.prescan_btn.setToolTip("Scan a low-DPI preview and set the crop for the next scan")
+        self.prescan_clear_btn = QPushButton("Clear")
+        self.prescan_clear_btn.setFixedWidth(56)
+        self.prescan_clear_btn.setToolTip("Scan the full window instead of a crop")
+        prescan_row.addWidget(self.prescan_btn, 1)
+        prescan_row.addWidget(self.prescan_clear_btn)
+        self.prescan_label = QLabel("Prescan")
+        self.form.addRow(self.prescan_label, self.prescan_widget)
+        self.prescan_status = hint_label("")
+        self.form.addRow("", self.prescan_status)
+        self.prescan_label.setVisible(False)
+        self.prescan_widget.setVisible(False)
+        self.prescan_status.setVisible(False)
+
         self.fmt_combo = QComboBox()
         self.fmt_combo.addItems(["TIFF", "DNG"])
         self.fmt_combo.setToolTip("Output file format")
@@ -281,6 +300,8 @@ class ScanSidebar(QWidget):
         self.frame_to_spin.valueChanged.connect(self._on_frame_to_changed)
         self.scan_window_btn.clicked.connect(self._on_set_scan_window)
         self.scan_window_clear_btn.clicked.connect(self._on_clear_scan_window)
+        self.prescan_btn.clicked.connect(self._on_prescan)
+        self.prescan_clear_btn.clicked.connect(self._on_clear_prescan_crop)
 
         # Controller signals
         self.controller.scan_devices_ready.connect(self._on_devices_ready)
@@ -388,6 +409,9 @@ class ScanSidebar(QWidget):
             self.exposure_row_widget.setVisible(False)
             self.autofocus_check.setVisible(False)
             self.ae_check.setVisible(False)
+            self.prescan_label.setVisible(False)
+            self.prescan_widget.setVisible(False)
+            self.prescan_status.setVisible(False)
             self._caps_autofocus = False
             self._caps_auto_exposure = False
             return
@@ -522,6 +546,13 @@ class ScanSidebar(QWidget):
             self.scan_window_btn.setToolTip("Preview each frame, set a window per frame, and pick which frames to scan")
             self._update_scan_window_status()
 
+        show_prescan = bool(caps.prescan)
+        self.prescan_label.setVisible(show_prescan)
+        self.prescan_widget.setVisible(show_prescan)
+        self.prescan_status.setVisible(show_prescan)
+        if show_prescan:
+            self._update_prescan_status()
+
         self.dpi_combo.blockSignals(False)
         self.depth_combo.blockSignals(False)
         self.ir_check.blockSignals(False)
@@ -586,6 +617,47 @@ class ScanSidebar(QWidget):
 
         self.settings = replace(self._settings, scan_window=None, frame_windows={}, selected_frames=())
         self._update_scan_window_status()
+
+    def _on_prescan(self) -> None:
+        from dataclasses import replace
+
+        from negpy.desktop.view.widgets.prescan_dialog import PrescanCropDialog
+
+        device = self._current_device()
+        if device is None or not device.capabilities.prescan:
+            return
+        dialog = PrescanCropDialog(
+            self.controller,
+            device,
+            initial_window=self._settings.scan_window,
+            parent=self,
+        )
+        if dialog.exec():
+            self.settings = replace(self._settings, scan_window=dialog.scan_window())
+            self._update_prescan_status()
+            self._save_settings()
+
+    def _on_clear_prescan_crop(self) -> None:
+        from dataclasses import replace
+
+        self.settings = replace(self._settings, scan_window=None)
+        self._update_prescan_status()
+        self._save_settings()
+
+    def _update_prescan_status(self) -> None:
+        from negpy.infrastructure.scanners.params import scan_window_to_area
+
+        device = self._current_device()
+        area = (
+            scan_window_to_area(self._settings.scan_window, device.capabilities.max_area_mm)
+            if device and self._settings.scan_window
+            else None
+        )
+        if area is None:
+            self.prescan_status.setText("Full window")
+        else:
+            tl_x, tl_y, br_x, br_y = area
+            self.prescan_status.setText(f"Crop {br_x - tl_x:.1f} × {br_y - tl_y:.1f} mm")
 
     def _update_scan_window_status(self) -> None:
         from negpy.infrastructure.scanners.params import scan_window_to_area
@@ -754,9 +826,11 @@ class ScanSidebar(QWidget):
             self.scan_btn.setIcon(qta.icon("fa5s.stop", color=THEME.text_primary))
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
+            self.prescan_btn.setEnabled(False)
         else:
             self.scan_btn.setText(" Scan")
             self.scan_btn.setIcon(qta.icon("fa5s.camera-retro", color=THEME.text_primary))
+            self.prescan_btn.setEnabled(True)
 
     def _update_settings_from_ui(self) -> None:
         dpi_text = self.dpi_combo.currentData() or self.dpi_combo.currentText()

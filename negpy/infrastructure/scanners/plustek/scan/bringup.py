@@ -18,6 +18,8 @@ GeometryProfile = Literal["preview_safe", "ppi_ladder"]
 
 NATIVE_DPI = 7200
 MM_PER_INCH = 25.4
+#: Fixed Prescan DPI (full window). Independent of the Scan-tab DPI picker.
+PRESCAN_DPI = 1200
 
 
 def is_opticfilm_8200i_se(model: Any) -> bool:
@@ -197,3 +199,90 @@ def _clamp_area_to_shading_table(model: Any, dpi: int, area: Area) -> Area:
     x1, y1, x2, y2 = area
     width = max(1e-9, x2 - x1)
     return (x1, y1, x1 + width * (table_n / n), y2)
+
+
+def clamp_area(area: Area) -> Area:
+    """Clamp a normalized TA rect to ``0..1`` with a tiny positive size."""
+    x1, y1, x2, y2 = (float(v) for v in area)
+    x1 = max(0.0, min(1.0, x1))
+    y1 = max(0.0, min(1.0, y1))
+    x2 = max(0.0, min(1.0, x2))
+    y2 = max(0.0, min(1.0, y2))
+    if x2 <= x1:
+        x2 = min(1.0, x1 + 1e-3)
+    if y2 <= y1:
+        y2 = min(1.0, y1 + 1e-3)
+    return (x1, y1, x2, y2)
+
+
+def _flip_x_norm(area: Area) -> Area:
+    """Mirror X in normalized coords: image-left ↔ sensor/TA-left when ``mirror_x``."""
+    x1, y1, x2, y2 = area
+    return (1.0 - x2, y1, 1.0 - x1, y2)
+
+
+def image_crop_to_scan_area(model: Any, crop_norm: Area) -> Area:
+    """Map Prescan crop widget coords → TA ``area`` for ``compute_geometry``.
+
+    The SE host flips the buffer (``mirror_x``) before display, so image-left is
+    sensor-right. Without this flip, trimming left chrome on the Prescan crops
+    the wrong optical side.
+    """
+    area = clamp_area(crop_norm)
+    if bool(getattr(model, "mirror_x", False)):
+        area = _flip_x_norm(area)
+    return clamp_area(area)
+
+
+def scan_area_to_image_crop(model: Any, area: Area) -> Area:
+    """Inverse of :func:`image_crop_to_scan_area` (same X flip when mirroring)."""
+    return image_crop_to_scan_area(model, area)
+
+
+def default_frame_crop_norm(model: Any) -> Area:
+    """Centered ~35 mm frame crop (session-13 ladder y-extent, full width).
+
+    Returned in **TA / scan** space. Convert with :func:`scan_area_to_image_crop`
+    before drawing on a mirrored Prescan.
+    """
+    area, _ = ladder_scan_area(model, PRESCAN_DPI)
+    return clamp_area(area)
+
+
+def crop_scan_geometry(
+    model: Any,
+    dpi: int,
+    area: Area,
+) -> tuple[ScanGeometry, dict[str, Any]]:
+    """Build geometry for an arbitrary normalized crop inside the TA window.
+
+    ``LINCNT`` is clamped to :meth:`max_lincnt_for` so the motor cannot overrun
+    the scan-window end. Optical span alignment stays in ``compute_geometry``.
+    """
+    area = clamp_area(area)
+    feed2 = _feed2_for(model, area[1])
+    max_fn = getattr(model, "max_lincnt_for", None)
+    max_lincnt = int(max_fn(feed2, dpi)) if callable(max_fn) else 0
+
+    geometry = compute_geometry(dpi, model=model, area=area)
+    target = int(geometry.lincnt_register)
+    if max_lincnt > 0 and target > max_lincnt:
+        geometry = apply_target_lincnt(geometry, max_lincnt)
+        target = max_lincnt
+
+    travel_mm = _travel_mm(model, target, dpi)
+    meta = {
+        "profile": "crop",
+        "feed2": feed2,
+        "max_lincnt": max_lincnt or target,
+        "target_lincnt": target,
+        "oversample": int(model.oversample_for(dpi)),
+        "y2": area[3],
+        "travel_mm": round(travel_mm, 3),
+        "dpi": int(dpi),
+        "geometry_lincnt": geometry.lincnt_register,
+        "optical_line_count": geometry.optical_line_count,
+        "area": geometry.area if geometry.area is not None else area,
+        "pixels": geometry.pixels,
+    }
+    return geometry, meta

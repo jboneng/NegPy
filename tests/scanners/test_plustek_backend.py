@@ -139,6 +139,7 @@ def test_backend_list_devices_maps_caps(monkeypatch):
     assert dev.capabilities.ir_channel is True
     assert dev.capabilities.auto_exposure is False
     assert dev.capabilities.autofocus is False
+    assert dev.capabilities.prescan is True
 
 
 def test_refresh_devices_re_enumerates(monkeypatch):
@@ -285,7 +286,8 @@ def test_default_se_scan_passes_preview_safe_geometry(monkeypatch):
     assert feed2 == 13128
 
 
-def test_explicit_window_skips_preview_safe_geometry(monkeypatch):
+def test_explicit_window_uses_crop_geometry(monkeypatch):
+    """SE crop must pass forced geometry (LINCNT-clamped), not bare area=window."""
     _patch_enum(monkeypatch)
     scanner = _fake_scanner()
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
@@ -297,8 +299,13 @@ def test_explicit_window_skips_preview_safe_geometry(monkeypatch):
         threading.Event(),
     )
     kwargs = scanner.scan.call_args.kwargs
-    assert kwargs.get("geometry") is None
-    assert kwargs.get("area") == window
+    assert kwargs.get("geometry") is not None
+    assert kwargs.get("area") is None
+    geo = kwargs["geometry"]
+    assert geo.pixels % 2 == 0
+    feed2 = scanner.model.feed_to_scan_steps_for_area(geo.area)
+    max_lc = scanner.model.max_lincnt_for(feed2, 1200)
+    assert geo.lincnt_register <= max_lc
 
 
 def test_open_session_shape(monkeypatch):

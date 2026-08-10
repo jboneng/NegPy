@@ -59,7 +59,7 @@ LS50_CAPS = ScannerCapabilities(
 )
 LS50_DEVICE = ScannerDevice(id="coolscan3:usb:libusb:001:050", vendor="Nikon", model="LS-50 ED", capabilities=LS50_CAPS)
 
-# A plain Plustek film scanner: none of the Coolscan-only controls apply.
+# A plain Plustek film scanner without Prescan (locked-out / non-SE model).
 MINIMAL_CAPS = ScannerCapabilities(
     ir_channel=False,
     supported_dpi=(1200, 2400),
@@ -68,6 +68,22 @@ MINIMAL_CAPS = ScannerCapabilities(
     max_area_mm=(36.0, 24.0),
 )
 MINIMAL_DEVICE = ScannerDevice(id="plustek:libusb:001:008", vendor="Plustek", model="OpticFilm", capabilities=MINIMAL_CAPS)
+
+# OpticFilm 8200i SE: Prescan + IR, single depth, no roll feeder.
+SE_CAPS = ScannerCapabilities(
+    ir_channel=True,
+    supported_dpi=(1200, 1800, 3600),
+    supported_depths=(16,),
+    sources=(ScanMode.TRANSPARENCY,),
+    max_area_mm=(36.33, 25.0),
+    prescan=True,
+)
+SE_DEVICE = ScannerDevice(
+    id="plustek:usb:07b3:1825:002:006",
+    vendor="PLUSTEK",
+    model="OpticFilm 8200i SE",
+    capabilities=SE_CAPS,
+)
 
 
 class _FakeRepo:
@@ -171,7 +187,25 @@ def test_minimal_device_hides_coolscan_controls() -> None:
     assert sidebar.depth_combo.isVisibleTo(sidebar) is False
     assert sidebar.depth_label.isVisibleTo(sidebar) is False
     assert sidebar.depth_combo.currentData() == 16
+    assert sidebar.prescan_widget.isVisibleTo(sidebar) is False
     assert sidebar.scan_btn.isEnabled() is True
+
+
+def test_se_device_shows_prescan() -> None:
+    sidebar, _ = _sidebar(SE_DEVICE)
+    assert sidebar.prescan_widget.isVisibleTo(sidebar) is True
+    assert sidebar.prescan_label.isVisibleTo(sidebar) is True
+    assert sidebar.ir_check.isEnabled() is True
+    assert sidebar.frame_range_widget.isVisibleTo(sidebar) is False
+
+
+def test_scan_params_include_prescan_crop() -> None:
+    sidebar, controller = _sidebar(SE_DEVICE, settings={"scan_window": (0.1, 0.2, 0.9, 0.8)})
+    sidebar.folder_edit.setText("/tmp/negpy-scan-out")
+    sidebar._on_scan()
+    kind, req = controller.started[0]
+    assert kind == "scan"
+    assert req.params.window == (0.1, 0.2, 0.9, 0.8)
 
 
 def test_14_bit_device_defaults_to_14_not_8() -> None:

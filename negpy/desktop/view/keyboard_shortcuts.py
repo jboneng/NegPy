@@ -97,6 +97,11 @@ class ShortcutManager:
             "flip_v": lambda: toolbar.flip("vertical"),
             "lock_bounds_toggle": lambda: controls.process_sidebar.lock_bounds_btn.toggle(),
             "scan_setup": lambda: controls.process_sidebar.scan_setup_btn.click(),
+            "scan_prescan": (
+                lambda: controls.scan_sidebar.prescan_btn.click()
+                if getattr(controls, "scan_sidebar", None) is not None
+                else None
+            ),
             "pick_wb": lambda: controls.colour_sidebar.pick_wb_btn.toggle(),
             "manual_crop": lambda: controls.geometry_sidebar.manual_crop_btn.toggle(),
             "straighten": lambda: controls.geometry_sidebar.straighten_btn.toggle(),
