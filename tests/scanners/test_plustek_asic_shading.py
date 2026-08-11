@@ -239,7 +239,6 @@ def test_shading_settle_constants_match_silverfast():
     from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
         COLOR_SHADING_DARK_MEAN_MAX,
         COLOR_SHADING_DARK_SETTLE_S,
-        COLOR_SHADING_SPAN_MIN,
         COLOR_SHADING_WHITE_MEAN_MIN,
         IR_SHADING_DARK_SETTLE_S,
         IR_SHADING_WHITE_MEAN_MIN,
@@ -248,32 +247,34 @@ def test_shading_settle_constants_match_silverfast():
     assert COLOR_SHADING_DARK_SETTLE_S == 0.5
     assert IR_SHADING_DARK_SETTLE_S == 0.5
     assert COLOR_SHADING_DARK_MEAN_MAX == 3000
-    assert COLOR_SHADING_SPAN_MIN >= 8000
-    assert COLOR_SHADING_WHITE_MEAN_MIN == IR_SHADING_WHITE_MEAN_MIN == 10000
+    assert IR_SHADING_WHITE_MEAN_MIN == 10000
+    # Post-unity DVDSET whites read ~50-57k, so the colour floor sits well above IR.
+    assert COLOR_SHADING_WHITE_MEAN_MIN == 20000
 
 
-def test_full_window_keeps_acquire_width_pads_shading_table():
-    """Full window at 1800/3600 is wider than AHB N — keep X; pad table (SF)."""
-    from negpy.infrastructure.scanners.plustek.scan.bringup import bringup_scan_geometry
-    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        shading_acquire_width,
-        shading_width_for_resolution,
+def test_shading_table_covers_the_full_image_window():
+    """The table spans every acquired column — no narrower AHB cap (sessions 03/04)."""
+    from negpy.infrastructure.scanners.plustek.scan.bringup import (
+        bringup_scan_geometry,
+        preview_safe_scan_area,
     )
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        declared_shading_size,
+        shading_acquire_width,
+        shading_entry_count,
+    )
+    from negpy.infrastructure.scanners.plustek.scan.geometry import compute_geometry
 
     for dpi in (1800, 3600):
-        from negpy.infrastructure.scanners.plustek.scan.bringup import preview_safe_scan_area
-        from negpy.infrastructure.scanners.plustek.scan.geometry import compute_geometry
-
         area, _ = preview_safe_scan_area(MODEL_8200I_SE, dpi, y1=0.0)
         raw = compute_geometry(dpi, model=MODEL_8200I_SE, area=area)
-        table_n = shading_width_for_resolution(dpi)
         raw_n = shading_acquire_width(
             strpixel=raw.pixel_startx,
             endpixel=raw.pixel_endx,
             dpiset=raw.register_dpiset,
             optical_resolution=MODEL_8200I_SE.optical_resolution,
         )
-        assert raw_n > table_n
+        assert shading_entry_count(declared_shading_size(raw_n)) == raw_n
 
         geometry, _ = bringup_scan_geometry(MODEL_8200I_SE, dpi, profile="preview_safe")
         bring_n = shading_acquire_width(
@@ -287,94 +288,196 @@ def test_full_window_keeps_acquire_width_pads_shading_table():
         assert geometry.pixel_endx == raw.pixel_endx
 
 
+def test_declared_shading_size_matches_capture_sessions():
+    """Declared AHB size = 4 x pairs with two pad pairs per full 512-byte block."""
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        SHADING_WIDTH_BY_DPI,
+        declared_shading_size,
+        shading_entry_count,
+    )
+
+    assert declared_shading_size(1728) == 21064  # session 03, 1200 dpi
+    assert declared_shading_size(2478) == 30208  # session 04, 1800 dpi
+    assert declared_shading_size(4956) == 60416  # session 06, 3600 dpi
+    assert SHADING_WIDTH_BY_DPI[1200] == 1728
+    assert SHADING_WIDTH_BY_DPI[1800] == 2478
+    for size in (21064, 30208, 60416):
+        assert declared_shading_size(shading_entry_count(size)) == size
+
+
+def test_pack_shading_table_pads_every_512_byte_block():
+    """DVDSET skips the last two pairs of each block; data must not fill them."""
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        SHADING_BLOCK_BYTES,
+        SHADING_BLOCK_DATA_PAIRS,
+        SHADING_GAIN_UNITY,
+        declared_shading_size,
+        make_unity_white_table,
+        unpack_shading_table,
+    )
+
+    n = 2478
+    dark = [(927, 1039, 1171)] * n
+    blob = make_unity_white_table(dark, declared_size=declared_shading_size(n))
+    assert len(blob) == 30208
+
+    gains = [int.from_bytes(blob[off + 2 : off + 4], "little") for off in range(0, len(blob), 4)]
+    for i, gain in enumerate(gains):
+        in_pad = i % (SHADING_BLOCK_BYTES // 4) >= SHADING_BLOCK_DATA_PAIRS
+        assert gain == (0 if in_pad else SHADING_GAIN_UNITY), f"pair {i}"
+    assert gains.count(SHADING_GAIN_UNITY) == n * 3
+
+    rows = unpack_shading_table(blob)[:n]
+    assert len(rows) == n
+    assert rows[0] == {"dark": [927, 1039, 1171], "gain": [SHADING_GAIN_UNITY] * 3}
+    assert rows[-1]["dark"] == [927, 1039, 1171]
+
+
+def test_shading_gain_inverts_the_white_profile():
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        SHADING_GAIN_MAX,
+        SHADING_GAIN_MIN,
+        SHADING_GAIN_TARGET,
+        SHADING_GAIN_UNITY,
+        shading_gain_for_white,
+        shading_gains_from_white,
+    )
+
+    assert SHADING_GAIN_UNITY == 0x2000
+    assert SHADING_GAIN_TARGET == 0xFFFF
+    # White already at target needs unity; a dimmer column needs more gain.
+    assert shading_gain_for_white(SHADING_GAIN_TARGET) == SHADING_GAIN_UNITY
+    assert shading_gain_for_white(SHADING_GAIN_TARGET / 2) == SHADING_GAIN_UNITY * 2
+    assert shading_gain_for_white(50000) > shading_gain_for_white(57000)
+    # Clamps hold at both extremes.
+    assert shading_gain_for_white(1) == SHADING_GAIN_MAX
+    assert shading_gain_for_white(1_000_000) == SHADING_GAIN_MIN
+
+    gains = shading_gains_from_white([(50000, 55000, 56000)])
+    assert gains[0][0] > gains[0][1] > gains[0][2]
+
+
+def test_measured_shading_table_stores_gains_not_whites():
+    """The gain slot must hold ~1.2x, never the 50k measurement (that inverts it)."""
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        SHADING_GAIN_UNITY,
+        build_measured_shading_table,
+        declared_shading_size,
+        unpack_shading_table,
+    )
+
+    n = 256
+    dark = [(927, 1039, 1171)] * n
+    white = [(49610, 55067, 56009)] * n
+    blob = build_measured_shading_table(dark, white, declared_size=declared_shading_size(n))
+    rows = unpack_shading_table(blob)[:n]
+    assert rows[0]["dark"] == [927, 1039, 1171]
+    for gain, expected in zip(rows[0]["gain"], (10822, 9750, 9586), strict=True):
+        assert abs(gain - expected) <= 2
+        assert 1.05 <= gain / SHADING_GAIN_UNITY <= 2.0
+    assert rows[-1]["gain"] == rows[0]["gain"]
+
+
+def test_session04_capture_gains_match_silverfast():
+    """Golden: SF's own coefficients from the white strip it measured."""
+    import json
+
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        SHADING_GAIN_TARGET,
+        SHADING_GAIN_UNITY,
+        shading_gain_for_white,
+    )
+
+    fixture = json.loads((Path(__file__).parent / "data" / "session04_shading_gain.json").read_text(encoding="utf-8"))
+    assert fixture["unity_gain"] == SHADING_GAIN_UNITY
+    assert fixture["sf_target"][0] == SHADING_GAIN_TARGET
+    for column in fixture["columns"]:
+        for channel, target in enumerate(fixture["sf_target"]):
+            got = shading_gain_for_white(column["white_unity"][channel], target=target)
+            assert abs(got - column["coeff"][channel]) <= 16, (column["x"], channel, got)
+
+
 def test_validate_color_shading_rejects_film_like_white():
     from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        validate_color_shading_table,
+        validate_color_shading_strip,
     )
 
     dark = [(800, 900, 850)] * 32
-    # Mean stays in the SF white band; R≪G/B is the orange-mask tell.
-    white = [(6000, 18000, 17000)] * 32
-    ok, reason = validate_color_shading_table(dark, white)
+    # R≪G/B is the orange-mask tell.
+    white = [(20000, 52000, 50000)] * 32
+    ok, reason = validate_color_shading_strip(dark, white)
     assert ok is False
     assert "film" in reason
 
 
-def test_validate_color_shading_accepts_sane_range():
+def test_validate_color_shading_accepts_session04_whites():
+    """Post-unity DVDSET whites (~50-57k) are the expected reading, not a fault."""
     from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        validate_color_shading_table,
+        validate_color_shading_strip,
+    )
+
+    dark = [(927, 1039, 1171)] * 32
+    white = [(49610, 55067, 56009)] * 32
+    ok, reason = validate_color_shading_strip(dark, white)
+    assert ok is True
+    assert reason == "ok"
+
+
+def test_validate_color_shading_rejects_railed_white():
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        validate_color_shading_strip,
+    )
+
+    dark = [(800, 900, 850)] * 32
+    white = [(65535, 65535, 65535)] * 32
+    ok, reason = validate_color_shading_strip(dark, white)
+    assert ok is False
+    assert "rail" in reason
+
+
+def test_validate_color_shading_rejects_dim_white():
+    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
+        validate_color_shading_strip,
     )
 
     dark = [(800, 900, 850)] * 32
     white = [(12000, 11500, 11000)] * 32
-    ok, reason = validate_color_shading_table(dark, white)
-    assert ok is True
-    assert reason == "ok"
-
-
-def test_validate_color_shading_rejects_raw_hot_white():
-    """DVDSET-off raw whites (~40k+) must not arm DVDSET (diamond/moiré)."""
-    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        COLOR_SHADING_WHITE_MEAN_MAX,
-        validate_color_shading_table,
-    )
-
-    dark = [(800, 900, 850)] * 32
-    white = [(40000, 41000, 39000)] * 32
-    ok, reason = validate_color_shading_table(dark, white)
+    ok, reason = validate_color_shading_strip(dark, white)
     assert ok is False
     assert "white mean" in reason
-    assert str(COLOR_SHADING_WHITE_MEAN_MAX) in reason
 
 
-def test_validate_color_shading_accepts_session04_whites():
-    """SF session-04 measured shading whites (~11.5k) must pass the floor."""
+def test_validate_color_shading_soft_accepts_high_dark():
     from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        validate_color_shading_table,
-    )
-
-    dark = [(927, 1039, 1171)] * 32
-    white = [(12366, 11093, 11154)] * 32
-    ok, reason = validate_color_shading_table(dark, white)
-    assert ok is True
-    assert reason == "ok"
-
-
-def test_validate_color_shading_accepts_live_mid_teens_white():
-    """Home whites slightly above SF (~19k) still pass; raw ~40k must not."""
-    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        validate_color_shading_table,
-    )
-
-    dark = [(900, 1000, 1100)] * 32
-    white = [(19000, 18500, 18000)] * 32
-    ok, reason = validate_color_shading_table(dark, white)
-    assert ok is True
-    assert reason == "ok"
-
-
-def test_validate_color_shading_soft_accepts_high_dark_with_range():
-    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        validate_color_shading_table,
+        validate_color_shading_strip,
     )
 
     dark = [(5000, 5500, 4800)] * 32
-    white = [(16000, 16500, 15500)] * 32
-    ok, reason = validate_color_shading_table(dark, white)
+    white = [(50000, 52000, 51000)] * 32
+    ok, reason = validate_color_shading_strip(dark, white)
     assert ok is True
     assert "soft dark" in reason
 
 
-def test_validate_color_shading_rejects_high_dark_when_white_collapsed():
+def test_validate_color_shading_gains_band():
     from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        validate_color_shading_table,
+        SHADING_GAIN_MAX,
+        SHADING_GAIN_UNITY,
+        shading_gains_from_white,
+        validate_color_shading_gains,
     )
 
-    dark = [(9000, 9500, 8800)] * 32
-    white = [(15000, 15200, 14800)] * 32  # in SF band, span < 8000
-    ok, reason = validate_color_shading_table(dark, white)
+    ok, reason = validate_color_shading_gains(shading_gains_from_white([(49610, 55067, 56009)] * 32))
+    assert ok is True
+    assert "median gain" in reason
+
+    ok, reason = validate_color_shading_gains([(SHADING_GAIN_UNITY,) * 3] * 32)
     assert ok is False
-    assert "white≈dark" in reason or "span" in reason
+    assert "already at target" in reason
+
+    ok, reason = validate_color_shading_gains([(SHADING_GAIN_MAX,) * 3] * 32)
+    assert ok is False
+    assert "too dim" in reason
 
 
 def test_adaptive_afe_gain_target_bright_probe_aims_sf_white():
@@ -591,6 +694,32 @@ def test_stationary_data_ready_ignores_busy_accepts_home_not_empty(monkeypatch):
         asic._wait_stationary_data_ready(0.0, where="test")
 
 
+def test_motorized_shading_data_ready_accepts_busy_without_home(monkeypatch):
+    """Colour white (DVDSET+MTRPWR) may leave home — accept not BUFEMPTY / 0xa5."""
+    import negpy.infrastructure.scanners.plustek.asic.gl128 as gl128_mod
+    from negpy.infrastructure.scanners.plustek.asic.gl128 import Gl128
+    from negpy.infrastructure.scanners.plustek.asic.status import ScannerStatus
+    from negpy.infrastructure.scanners.plustek.exceptions import ScanError
+
+    monkeypatch.setattr(gl128_mod.time, "sleep", lambda *_a, **_k: None)
+
+    asic = Gl128(MagicMock(), MODEL_8200I_SE)
+    asic.read_status = MagicMock(
+        side_effect=[
+            ScannerStatus.from_reg41(0xDC),  # discard
+            ScannerStatus.from_reg41(0xE5),  # empty, no home
+            ScannerStatus.from_reg41(0xA5),  # not empty, motor busy, no home
+        ]
+    )
+    asic._wait_shading_data_ready(1.0, where="white", motorized=True)
+    assert asic.read_status.call_count == 3
+
+    # Stationary path still rejects the same busy code.
+    asic.read_status = MagicMock(return_value=ScannerStatus.from_reg41(0xA5))
+    with pytest.raises(ScanError, match="stationary data ready"):
+        asic._wait_shading_data_ready(0.0, where="dark", motorized=False)
+
+
 def test_apply_stationary_scan_regs_writes_capture_mode_block():
     from negpy.infrastructure.scanners.plustek.asic.gl128 import Gl128
 
@@ -613,32 +742,40 @@ def test_shading_strip_setup_sets_dvdset_when_requested():
     proto = MagicMock()
     proto.write_u24 = MagicMock()
     proto.write_u16 = MagicMock()
-    proto.read_register = MagicMock(side_effect=lambda addr: {
-        0x01: 0x22,
-        0x02: 0x10,
-        0x04: 0x42,
-        0x05: 0x40,
-        0x2B: 0x02,
-        0xA5: 0x02,
-        0xAB: 0x02,
-    }.get(addr, 0))
+    proto.read_register = MagicMock(
+        side_effect=lambda addr: {
+            0x01: 0x22,
+            0x02: 0x10,
+            0x04: 0x42,
+            0x05: 0x40,
+            0x2B: 0x02,
+            0xA5: 0x02,
+            0xAB: 0x02,
+        }.get(addr, 0)
+    )
     asic = Gl128(proto, MODEL_8200I_SE)
     asic._apply_stationary_scan_regs = MagicMock()
-    asic._setup_shading_strip_regs(
-        pixels=100, lines=128, resolution=1800, dvdset=True
-    )
+    asic._setup_shading_strip_regs(pixels=100, lines=128, resolution=1800, dvdset=True)
+    asic._apply_stationary_scan_regs.assert_not_called()
+    # Geometry is written on both strips so the white pass never inherits a stale window.
+    assert proto.write_u24.call_count >= 4
     assert asic._reg_cache[0x01] & 0x20  # DVDSET
-    # SF white uses MTRPWR; AGOHOME is OR'd so SCAN-clear parks after travel.
+    # SF white uses MTRPWR; NegPy ORs AGOHOME so SCAN-clear parks on live HW.
     assert asic._reg_cache[r.REG_0x02] & r.MTRPWR
     assert asic._reg_cache[r.REG_0x02] & r.AGOHOME
+    # SF white clears 0x3B/0xA3; _SCAN_REGS alone would leave 0x3B=1.
+    assert asic._reg_cache[0x3B] == 0x00
+    assert asic._reg_cache[0xA3] == 0x00
     assert asic._reg_cache[0x2B] == MODEL_8200I_SE.dummy_by_dpi[1800]
     assert asic._reg_cache[0xA5] == MODEL_8200I_SE.pixel_clock_by_dpi[1800]
     assert asic._reg_cache[0xAB] == MODEL_8200I_SE.pixel_clock_by_dpi[1800]
-    asic._setup_shading_strip_regs(
-        pixels=100, lines=128, resolution=1800, dvdset=False
-    )
+    proto.write_u24.reset_mock()
+    asic._setup_shading_strip_regs(pixels=100, lines=128, resolution=1800, dvdset=False)
+    asic._apply_stationary_scan_regs.assert_called_once()
+    assert proto.write_u24.call_count >= 4  # LINCNT, STR, END, FEEDL, ...
     assert not (asic._reg_cache[0x01] & 0x20)
     assert asic._reg_cache[r.REG_0x02] == 0x00
+    assert asic._reg_cache[0xA3] == 0x01  # SF dark
     dark_dummy, dark_a, dark_b = MODEL_8200I_SE.shading_strip_clocks(1800, dvdset=False)
     assert asic._reg_cache[0x2B] == dark_dummy
     assert asic._reg_cache[0xA5] == dark_a
@@ -701,11 +838,6 @@ def test_run_asic_shading_calls_exposure_only_after_unity(monkeypatch):
     asic.upload_tables = MagicMock(side_effect=_upload)
     monkeypatch.setattr(
         gl128_mod,
-        "validate_color_shading_table",
-        lambda *_a, **_k: (False, "white mean hot"),
-    )
-    monkeypatch.setattr(
-        gl128_mod,
         "average_rgb16_columns",
         MagicMock(
             side_effect=[
@@ -714,36 +846,13 @@ def test_run_asic_shading_calls_exposure_only_after_unity(monkeypatch):
             ]
         ),
     )
-    monkeypatch.setattr(gl128_mod, "host_unity_preview_mean", lambda *_a, **_k: 13500.0)
-    monkeypatch.setattr(
-        gl128_mod,
-        "shading_columns_mean",
-        lambda cols: float(sum(sum(c) for c in cols) / max(1, len(cols) * 3)),
-    )
 
-    asic.run_asic_shading(
-        resolution=1800, strpixel=240, endpixel=240 + n * 4, dpiset=300
-    )
+    asic.run_asic_shading(resolution=1800, strpixel=240, endpixel=240 + n * 4, dpiset=300)
     assert calls, "expected upload_tables after unity"
     assert calls[0]["slope"] is False
-
-
-def test_host_unity_preview_mean_matches_sf_band():
-    from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        host_unity_preview_mean,
-        maybe_host_unity_colour_white,
-    )
-
-    dark = [(915, 998, 1050)]
-    white = [(36119, 46343, 43724)]
-    mean = host_unity_preview_mean(dark, white)
-    assert 9000.0 <= mean <= 12000.0
-
-    cols, used, raw_mean, result_mean = maybe_host_unity_colour_white(dark, white)
-    assert used is True
-    assert raw_mean > 20000
-    assert 10000.0 <= result_mean <= 20000.0
-    assert cols[0][0] < 20000
+    # One unity upload, one measured upload — no re-upload after arming 0x22.
+    assert asic.upload_shading_table.call_count == 2
+    assert asic.asic_shading_ready is True
 
 
 def test_measure_colour_falls_back_to_host_calib_when_dvdset_white_raw():
@@ -816,14 +925,18 @@ def test_await_colour_optical_dark_accepts_dark_probe(monkeypatch):
     assert asic.acquire_afe_strip.call_count == 1
 
 
-def test_validate_rejects_collapsed_span_even_if_white_mid():
+def test_validate_rejects_starved_channel():
     from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
-        COLOR_SHADING_MIN_RANGE,
-        COLOR_SHADING_SPAN_MIN,
+        COLOR_SHADING_CHANNEL_WHITE_MIN,
+        validate_color_shading_strip,
     )
 
-    assert COLOR_SHADING_MIN_RANGE >= 8000
-    assert COLOR_SHADING_SPAN_MIN >= 8000
+    assert COLOR_SHADING_CHANNEL_WHITE_MIN >= 8000
+    dark = [(900, 1000, 1100)] * 32
+    white = [(55000, 56000, 4000)] * 32
+    ok, reason = validate_color_shading_strip(dark, white)
+    assert ok is False
+    assert "ch2 white" in reason
 
 
 def test_infrared_cache_miss_does_not_force_colour_calib(tmp_path: Path, monkeypatch):
@@ -880,6 +993,69 @@ def test_host_calib_border_clamp_caps_hot_margins():
     rgb[-4:, :, :] = 65535
     rgb[:, :4, :] = 65535
     rgb[:, -4:, :] = 65535
-    out = pipe.clamp_host_calib_border_highlights(rgb)
+    out = pipe.clamp_border_highlights(rgb)
     assert int(out[:4].max()) <= int(out[10:90, 10:90].max())
     assert int(out[40:60, 40:60].mean()) == 25000
+
+
+def test_border_clamp_ceiling_is_per_channel():
+    """A joint ceiling leaves the margin above a dim channel's own film peak.
+
+    Session 004: green's film window peaked at 19306 while the joint p99.7 was
+    27432, so the clamped chrome became green's brightest content and auto Dmin
+    metered it — a 1.42x green lift in the positive.
+    """
+    from negpy.infrastructure.scanners.plustek.scan.pipeline import ImagePipeline
+
+    pipe = ImagePipeline(MODEL_8200I_SE)
+    h, w = 200, 200
+    rgb = np.zeros((h, w, 3), dtype=np.uint16)
+    rgb[:, :, 0] = 27000
+    rgb[:, :, 1] = 19300
+    rgb[:, :, 2] = 27600
+    rgb[:6, :, :] = 65535
+    rgb[-6:, :, :] = 65535
+    rgb[:, :6, :] = 65535
+    rgb[:, -6:, :] = 65535
+    out = pipe.clamp_border_highlights(rgb)
+    film = out[20:180, 20:180]
+    for c, expected in enumerate((27000, 19300, 27600)):
+        assert int(film[:, :, c].max()) == expected
+        assert int(out[:6, :, c].max()) <= expected + 1
+
+
+def test_assemble_exposes_and_clamps_on_the_asic_shading_path():
+    """DVDSET references home chrome, so both makeup and clamp must still run."""
+    from negpy.infrastructure.scanners.plustek.scan.pipeline import ImagePipeline
+
+    pipe = ImagePipeline(MODEL_8200I_SE)
+    seen: list[str] = []
+    pipe.expose_film_base = lambda rgb, **_kw: (seen.append("expose") or rgb)  # type: ignore[method-assign]
+    pipe.clamp_border_highlights = lambda rgb, **_kw: (seen.append("clamp") or rgb)  # type: ignore[method-assign]
+    geometry = _geometry(1800)
+    rgb = np.zeros((geometry.lines, geometry.pixels, 3), dtype=np.uint16)
+    pipe.decode_rgb = lambda *_a, **_k: rgb  # type: ignore[method-assign]
+    pipe.assemble(b"", geometry, dark=None, white=None, planar=False)
+    assert seen == ["expose", "clamp"]
+
+
+def test_expose_film_base_keeps_the_orange_mask_ratios():
+    """The makeup must be scalar — a per-channel lift neutralizes the mask."""
+    from negpy.infrastructure.scanners.plustek.scan.pipeline import (
+        HOST_CALIB_PEAK_TARGET,
+        ImagePipeline,
+    )
+
+    pipe = ImagePipeline(MODEL_8200I_SE)
+    h, w = 120, 120
+    rgb = np.zeros((h, w, 3), dtype=np.uint16)
+    # Session 004 film-window levels: base at 42% of scale, green 0.71x of red.
+    rgb[:, :, 0] = 27046
+    rgb[:, :, 1] = 19306
+    rgb[:, :, 2] = 27695
+    out = pipe.expose_film_base(rgb, source="test")
+    peak = float(out.max())
+    assert 0.98 <= peak / HOST_CALIB_PEAK_TARGET <= 1.02
+    before = 19306 / 27046
+    after = float(out[:, :, 1].mean()) / float(out[:, :, 0].mean())
+    assert abs(after - before) < 0.005

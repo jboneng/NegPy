@@ -159,9 +159,9 @@ def bringup_scan_geometry(
     else:
         area, meta = preview_safe_scan_area(model, dpi, y1=0.0)
 
-    # Do not shrink X to the AHB shading-table width. SF Full window at 1800 is
-    # 2592 px; clamping to 2517 made USB line length disagree with the ASIC and
-    # sheared the frame into a diamond. Pad the shading table up instead.
+    # Do not shrink X to fit a shading table. SF Full window at 1800 is 2592 px;
+    # clamping it made USB line length disagree with the ASIC and sheared the
+    # frame into a diamond. The shading table covers the acquired columns instead.
     geometry = compute_geometry(dpi, model=model, area=area)
     geometry = apply_target_lincnt(geometry, int(meta["target_lincnt"]))
 
@@ -178,8 +178,8 @@ def bringup_scan_geometry(
 def _clamp_area_to_shading_table(model: Any, dpi: int, area: Area) -> Area:
     """Deprecated: shrinking the image window to the AHB table shears USB lines.
 
-    Kept for unit tests that assert the old ratio math. Prefer padding the
-    shading table to the acquire width.
+    Kept for unit tests that assert the old ratio math. The shading table is
+    measured and uploaded at the acquire width instead.
     """
     from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
         shading_acquire_width,

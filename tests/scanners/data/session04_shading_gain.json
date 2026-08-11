@@ -1,0 +1,29 @@
+{
+  "source": "captures/8200i-se/04_color_1800 (SilverFast, 1800 dpi colour, 2478 px)",
+  "note": [
+    "white_unity is the per-column mean of the 128-line white strip that SilverFast",
+    "read at t=6.9249 with the unity table loaded and DVDSET armed, so the ASIC had",
+    "already removed the dark term. coeff is the same column of SilverFast's second",
+    "shading upload at t=7.758. Both are de-padded: the blob is written in 512-byte",
+    "blocks of 126 (dark, gain) pairs plus two gain=0 pad pairs.",
+    "coeff = round(sf_target[channel] * 0x2000 / white_unity) to within ~10 LSB.",
+    "sf_target[0] is 0xFFFF exactly; SilverFast tilts G/B up 1-2% as its own white",
+    "balance, which NegPy does later in the pipeline instead."
+  ],
+  "width": 2478,
+  "declared_size": 30208,
+  "unity_gain": 8192,
+  "pairs_per_block": 128,
+  "data_pairs_per_block": 126,
+  "sf_target": [65535, 66190, 66844],
+  "dark_upload_equals_unity_upload": true,
+  "columns": [
+    {"x": 0, "dark": [927, 1039, 1171], "white_unity": [43395.81, 48854.48, 49083.3], "coeff": [12366, 11093, 11154]},
+    {"x": 1, "dark": [927, 1039, 1171], "white_unity": [43600.27, 48786.8, 48960.0], "coeff": [12315, 11115, 11186]},
+    {"x": 2, "dark": [927, 1039, 1171], "white_unity": [43590.16, 48711.6, 49261.77], "coeff": [12314, 11128, 11119]},
+    {"x": 100, "dark": [922, 1036, 1168], "white_unity": [45841.66, 51589.28, 51787.01], "coeff": [11709, 10513, 10575]},
+    {"x": 1000, "dark": [918, 1032, 1162], "white_unity": [51405.76, 57634.82, 58178.34], "coeff": [10440, 9409, 9414]},
+    {"x": 2000, "dark": [917, 1033, 1164], "white_unity": [49661.43, 54291.73, 55994.96], "coeff": [10813, 9985, 9780]},
+    {"x": 2477, "dark": [920, 1028, 1163], "white_unity": [42258.08, 47009.92, 47860.53], "coeff": [12707, 11531, 11440]}
+  ]
+}

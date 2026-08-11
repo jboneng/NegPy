@@ -46,9 +46,8 @@ from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
     COLOR_AFE_SESSION04_GAINS,
     COLOR_SHADING_DARK_MEAN_MAX,
     COLOR_SHADING_DARK_SETTLE_S,
-    COLOR_SHADING_WHITE_MEAN_MAX,
-    COLOR_SHADING_WHITE_MEAN_MIN,
     IR_SHADING_DARK_SETTLE_S,
+    SHADING_GAIN_UNITY,
     SHADING_LINES,
     AfeFrontend,
     AfeSearchConfig,
@@ -60,13 +59,14 @@ from negpy.infrastructure.scanners.plustek.scan.calib_gl128 import (
     coarse_offsets_from_wide_means,
     declared_shading_size,
     equalize_ir_white_columns,
-    host_unity_preview_mean,
     make_unity_white_table,
     search_afe_codes,
     shading_acquire_width,
     shading_columns_mean,
+    shading_gains_from_white,
     shading_width_for_resolution,
-    validate_color_shading_table,
+    validate_color_shading_gains,
+    validate_color_shading_strip,
     validate_ir_shading_table,
 )
 from negpy.infrastructure.scanners.plustek.usb.protocol import GenesysUsbProtocol
@@ -294,15 +294,19 @@ class Gl128:
         for index, value in frontend.as_fe_writes():
             self.protocol.write_fe_register_gl124(index, value)
 
-    def _apply_stationary_scan_regs(self) -> None:
+    def _apply_stationary_scan_regs(self, *, include_memory_layout: bool = True) -> None:
         """Capture ``sensor_custom_regs`` + memory layout for calib acquires.
 
         Boot leaves ``0x04=0x02`` / ``0x05=0x48``; every session-03 AFE and
         shading strip rewrites ``0x04=0x42`` / ``0x05=0x40`` (and the rest of
         ``_SCAN_REGS``) plus the ``0xd0``–``0xf8`` layout before START.
+
+        Session 04 does **not** rewrite ``0xd0``–``0xf8`` between the unity
+        shading upload and the DVDSET white measure — skip that block there.
         """
         r = self.registers
-        self._write_many(dict(self.model.memory_layout_regs))
+        if include_memory_layout:
+            self._write_many(dict(self.model.memory_layout_regs))
         custom = dict(self.model.sensor_custom_regs)
         # Never clobber lamp / IR from a stale table copy.
         custom.pop(r.REG_0x03, None)
@@ -313,7 +317,22 @@ class Gl128:
         """Poll ``0x101`` until stationary calib data is ready at home.
 
         Accept known capture codes, or any ``not BUFEMPTY`` while ``HOME`` is
-        set (rejects motor-busy ``0xa5``, which lacks HOME).
+        set (rejects motor-busy ``0xa5``, which lacks HOME). Use
+        :meth:`_wait_shading_data_ready` with ``motorized=True`` for the SF
+        colour white strip (``MTRPWR``, may leave home).
+        """
+        self._wait_shading_data_ready(timeout_s, where=where, motorized=False)
+
+    def _wait_shading_data_ready(self, timeout_s: float, *, where: str, motorized: bool = False) -> None:
+        """Poll ``0x101`` until shading/AFE strip data is ready.
+
+        ``motorized=False`` (dark / AFE): require HOME + not BUFEMPTY (or a
+        known home ready code). Rejects motor-busy ``0xa5`` so a prior strip's
+        stale AHB is not drained while the head is off home.
+
+        ``motorized=True`` (colour white / DVDSET): SF runs ``MTRPWR`` so the
+        head may leave home — accept any ``not BUFEMPTY`` (including ``0xa5``).
+        Call only after START; CLRCNT + prior SCAN clear avoid true stale AHB.
         """
         self.read_status()
         deadline = time.monotonic() + timeout_s
@@ -321,15 +340,14 @@ class Gl128:
         while time.monotonic() < deadline:
             status = self.read_status()
             last = int(status.raw) & 0xFF
-            if last in _STATIONARY_DATA_READY or (
-                not status.is_buffer_empty and status.is_at_home
-            ):
+            if motorized:
+                if not status.is_buffer_empty:
+                    return
+            elif last in _STATIONARY_DATA_READY or (not status.is_buffer_empty and status.is_at_home):
                 return
             time.sleep(0.01)
-        raise ScanError(
-            f"{where}: no stationary data ready within {timeout_s:.0f}s "
-            f"(last status=0x{last:02x})"
-        )
+        kind = "motorized" if motorized else "stationary"
+        raise ScanError(f"{where}: no {kind} data ready within {timeout_s:.0f}s (last status=0x{last:02x})")
 
     def _setup_afe_strip_regs(self, *, wide: bool = False) -> None:
         """Stationary AFE strip geometry (session 03 window, motor off)."""
@@ -524,8 +542,7 @@ class Gl128:
                 result = AfeFrontend(offsets=offsets, gains=(0x80, 0x80, 0x80))
                 fallback_label = "kept offsets + mid-probe 0x80"
             logger.warning(
-                "GL128 AFE gains pegged at max %s with means=(%.0f,%.0f,%.0f); "
-                "falling back to %s (offsets=%s gains=%s)",
+                "GL128 AFE gains pegged at max %s with means=(%.0f,%.0f,%.0f); falling back to %s (offsets=%s gains=%s)",
                 pegged_gains,
                 pegged_means[0],
                 pegged_means[1],
@@ -534,13 +551,22 @@ class Gl128:
                 result.offsets,
                 result.gains,
             )
-        elif not infrared and (
-            result.offsets == (0, 0, 0) or result.gains == (0, 0, 0)
-        ):
-            restored_offsets = offset_seed if offset_seed != (0, 0, 0) else result.offsets
-            restored_gains = (
-                COLOR_AFE_SESSION04_GAINS if result.gains == (0, 0, 0) else result.gains
+        elif not infrared and any(g >= peg_floor for g in result.gains):
+            # One runaway channel is as bad as three: at the rail its dark term
+            # clips to 0 and the whole frame takes that channel's cast. SF's own
+            # codes are the safe stand-in for a channel the search cannot reach.
+            safe = [COLOR_AFE_SESSION04_GAINS[c] if g >= peg_floor else g for c, g in enumerate(result.gains)]
+            capped: tuple[int, int, int] = (safe[0], safe[1], safe[2])
+            logger.warning(
+                "GL128 AFE gain pegged on some channels %s (target %#x unreachable); using session-04 codes there → %s",
+                result.gains,
+                int(gain_target),
+                capped,
             )
+            result = AfeFrontend(offsets=offsets, gains=capped)
+        elif not infrared and (result.offsets == (0, 0, 0) or result.gains == (0, 0, 0)):
+            restored_offsets = offset_seed if offset_seed != (0, 0, 0) else result.offsets
+            restored_gains = COLOR_AFE_SESSION04_GAINS if result.gains == (0, 0, 0) else result.gains
             if restored_offsets == (0, 0, 0):
                 restored_offsets = (38, 30, 36)
             result = AfeFrontend(offsets=restored_offsets, gains=restored_gains)
@@ -553,8 +579,7 @@ class Gl128:
         self.last_afe = result
         final_means = measure(result)
         logger.info(
-            "GL128 AFE search done offsets=%s gains=%s means=(%.0f,%.0f,%.0f) "
-            "targets offset=%#x gain=%#x planar=%s",
+            "GL128 AFE search done offsets=%s gains=%s means=(%.0f,%.0f,%.0f) targets offset=%#x gain=%#x planar=%s",
             result.offsets,
             result.gains,
             final_means[0],
@@ -613,7 +638,6 @@ class Gl128:
     ) -> None:
         """Multi-line shading geometry (image window; motor policy per DVDSET)."""
         r = self.registers
-        self._apply_stationary_scan_regs()
         start, end, dpi_calib = self._shading_window(
             pixels=pixels,
             resolution=resolution,
@@ -624,48 +648,45 @@ class Gl128:
         clocks = getattr(self.model, "shading_strip_clocks", None)
         if callable(clocks):
             dummy, clk_a, clk_b = clocks(int(resolution), dvdset=dvdset)
-            self._write(0x2B, int(dummy))
-            self._write(0xA5, int(clk_a))
-            self._write(0xAB, int(clk_b))
         else:
-            # Non-SE models: image-dpi clocks for both strips.
             asic_dpi = self.model.asic_dpi_for(int(resolution))
             dummy_map = getattr(self.model, "dummy_by_dpi", None)
             clock_map = getattr(self.model, "pixel_clock_by_dpi", None)
-            if dummy_map is not None and asic_dpi in dummy_map:
-                self._write(0x2B, int(dummy_map[asic_dpi]))
-            if clock_map is not None and asic_dpi in clock_map:
-                clk = int(clock_map[asic_dpi])
-                self._write(0xA5, clk)
-                self._write(0xAB, clk)
+            dummy = int(dummy_map.get(asic_dpi, 0x02)) if dummy_map else 0x02
+            clk = int(clock_map.get(asic_dpi, 0x02)) if clock_map else 0x02
+            clk_a = clk_b = clk
+        # Session 04 leaves the geometry standing between the dark strip and the
+        # DVDSET white; write it on both so a white strip never inherits a stale
+        # window (the values are identical when the caller passes one window).
+        if not dvdset:
+            self._apply_stationary_scan_regs()
+        self._write(0x2B, int(dummy))
+        self._write(0xA5, int(clk_a))
+        self._write(0xAB, int(clk_b))
         self.protocol.write_u24(r.REG_LINCNT, int(lines))
         self.protocol.write_u16(r.REG_DPISET, dpi_calib)
         self.protocol.write_u24(r.REG_STRPIXEL, start)
         self.protocol.write_u24(r.REG_ENDPIXEL, end)
         self.protocol.write_u24(r.REG_FEEDL, 1)
-        self.protocol.write_u24(
-            r.REG_LPERIOD, int(self.model.line_period_for(int(resolution)))
-        )
+        self.protocol.write_u24(r.REG_LPERIOD, int(self.model.line_period_for(int(resolution))))
         self.protocol.write_u24(r.REG_EXPOSURE, int(self.model.exposure_lperiod))
         self._write(r.REG_DEPTH_A, r.DEPTH16_A)
         self._write(r.REG_DEPTH_B, r.DEPTH16_B)
-        # Colour white (DVDSET): SF uses MTRPWR (0x10). SCAN+LINCNT advances the
-        # head here, so OR AGOHOME (image-pass park bit) — clearing SCAN then
-        # returns home (MOTOR.md). Dark / IR white: motor off.
         if dvdset:
             self._write(r.REG_0x02, r.MTRPWR | r.AGOHOME)
+            self._write(0x3B, 0x00)
+            self._write(0xA3, 0x00)
+            reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA | r.DVDSET) & ~r.SCAN
         else:
             self._write(r.REG_0x02, 0x00)
-        # Dark: SHDAREA only. White after unity upload: SHDAREA|DVDSET (0x22/0x23).
-        reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA) & ~r.SCAN
-        if dvdset:
-            reg01 |= r.DVDSET
-        else:
-            reg01 &= ~r.DVDSET
+            self._write(0xA3, 0x01)
+            reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA) & ~r.SCAN & ~r.DVDSET
         self._write(r.REG_0x01, reg01)
         if dvdset:
             rb01 = int(self.protocol.read_register(r.REG_0x01)) & 0xFF
             rb02 = int(self.protocol.read_register(r.REG_0x02)) & 0xFF
+            rb3b = int(self.protocol.read_register(0x3B)) & 0xFF
+            rb_a3 = int(self.protocol.read_register(0xA3)) & 0xFF
             rb04 = int(self.protocol.read_register(0x04)) & 0xFF
             rb05 = int(self.protocol.read_register(0x05)) & 0xFF
             rb2b = int(self.protocol.read_register(0x2B)) & 0xFF
@@ -673,10 +694,12 @@ class Gl128:
             rb_ab = int(self.protocol.read_register(0xAB)) & 0xFF
             logger.info(
                 "GL128 shading strip DVDSET setup readback "
-                "0x01=%#04x 0x02=%#04x 0x04=%#04x 0x05=%#04x "
-                "0x2B=%#04x 0xA5=%#04x 0xAB=%#04x",
+                "0x01=%#04x 0x02=%#04x 0x3B=%#04x 0xA3=%#04x "
+                "0x04=%#04x 0x05=%#04x 0x2B=%#04x 0xA5=%#04x 0xAB=%#04x",
                 rb01,
                 rb02,
+                rb3b,
+                rb_a3,
                 rb04,
                 rb05,
                 rb2b,
@@ -702,7 +725,12 @@ class Gl128:
         dpiset: int | None = None,
         dvdset: bool = False,
     ) -> bytes:
-        """Read a stationary multi-line 16-bit strip for ASIC shading."""
+        """Read a multi-line 16-bit strip for ASIC shading.
+
+        Dark (``dvdset=False``): motor off, wait at home. Colour white
+        (``dvdset=True``): DVDSET + ``MTRPWR|AGOHOME``, motorized data-ready
+        wait, then SCAN-clear parks via AGOHOME.
+        """
         if not self._initialized:
             self.init()
         n = int(pixels) if pixels is not None else shading_width_for_resolution(resolution)
@@ -725,7 +753,7 @@ class Gl128:
             self._write(r.REG_0x02, 0x00)
         self._write(r.REG_CLRCNT, r.CLRCNT_ALL)
         # Absolute SCAN write — RMW can drop DVDSET if a stale 0x01 read races.
-        reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA | r.SCAN)
+        reg01 = self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA | r.SCAN
         if dvdset:
             reg01 |= r.DVDSET
         else:
@@ -733,9 +761,7 @@ class Gl128:
         self._write(r.REG_0x01, reg01)
         if dvdset:
             logger.info(
-                "GL128 shading strip START "
-                "0x01=%#04x 0x02=%#04x LPERIOD=%d DEPTH=%#04x/%#04x "
-                "(want 0x01=%#04x 0x02=%#04x)",
+                "GL128 shading strip START 0x01=%#04x 0x02=%#04x LPERIOD=%d DEPTH=%#04x/%#04x (want 0x01=%#04x 0x02=%#04x)",
                 int(self.protocol.read_register(r.REG_0x01)) & 0xFF,
                 int(self.protocol.read_register(r.REG_0x02)) & 0xFF,
                 int(self.model.line_period_for(int(resolution))),
@@ -747,7 +773,7 @@ class Gl128:
         self._write(r.REG_START, r.START_GO)
 
         try:
-            self._wait_stationary_data_ready(timeout_s, where="Shading strip")
+            self._wait_shading_data_ready(timeout_s, where="Shading strip", motorized=dvdset)
         except ScanError:
             self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
             if dvdset:
@@ -761,7 +787,7 @@ class Gl128:
             if not chunk:
                 break
             buf.extend(chunk)
-        # Clear SCAN first so AGOHOME (colour white) can park, then drop motor.
+        # Clear SCAN so AGOHOME (armed during white) parks, then drop motor.
         self._update_bits(r.REG_0x01, clear_bits=r.SCAN)
         if dvdset:
             try:
@@ -770,8 +796,7 @@ class Gl128:
             except MotorTimeoutError as exc:
                 self._write(r.REG_0x02, 0x00)
                 raise ScanError(
-                    "Shading white strip: AGOHOME did not return the carriage home. "
-                    "Park with SilverFast or power-cycle, then retry."
+                    "Shading white strip: AGOHOME did not return the carriage home. Park with SilverFast or power-cycle, then retry."
                 ) from exc
         self._write(r.REG_0x02, 0x00)
         if len(buf) < size:
@@ -792,17 +817,17 @@ class Gl128:
         Returns the final measured shading blob. Sets ``asic_shading_ready``.
         Image scans keep ``DVDSET`` when ready so the ASIC applies this table.
 
-        Colour white strip: SF ``MTRPWR`` plus ``AGOHOME`` so SCAN-clear parks
-        (live MTRPWR alone advances the head). Exposure AHB only after unity;
-        dark/white use capture clocks.
+        Colour white strip: DVDSET + ``MTRPWR|AGOHOME`` (AGOHOME during the
+        measure so SCAN-clear parks; SF is MTRPWR-only). Exposure AHB only
+        after unity; dark/white use capture clocks.
 
         Pass ``method=\"infrared\"`` so the white strip runs under the IR LED
         (session 05: IR table uses zero dark terms + near-equal whites).
 
-        Pass the image ``strpixel``/``endpixel``/``dpiset`` so the acquire uses
-        the same window the scan uses. Acquire width follows that window (Full
-        window @1800 ≈ 2592). The AHB upload is padded *up* to
-        ``max(map_N, acquire)`` — never shrink the image X to the old 2517 map.
+        Pass the image ``strpixel``/``endpixel``/``dpiset`` so shading uses the
+        same origin as the scan. The table covers exactly the measured columns —
+        a table measured through a different window is indexed differently from
+        the image and DVDSET turns that into periodic dropouts.
 
         For ``method=\"infrared\"``, the optical dark strip is diagnostic only —
         the uploaded table dark is forced to zero (session 05). Live ASIC DVDSET
@@ -821,34 +846,23 @@ class Gl128:
             self.set_scan_method(method)
         infrared = self._scan_method == "infrared"
         self._require_carriage_at_home("ASIC shading start")
-        table_n = shading_width_for_resolution(resolution)
-        # Resolve window first so acquire width matches STR/END, not table pad.
         start, end, used_dpiset = self._shading_window(
-            pixels=table_n,
+            pixels=shading_width_for_resolution(resolution),
             resolution=resolution,
             strpixel=strpixel,
             endpixel=endpixel,
             dpiset=dpiset,
         )
+        # The table covers exactly the pixels the strip measures — sessions 03/04
+        # upload one column per acquired column (2478 px at 1800, 1728 at 1200).
         n = shading_acquire_width(
             strpixel=start,
             endpixel=end,
             dpiset=used_dpiset,
             optical_resolution=self.model.optical_resolution,
         )
-        # SF pads the AHB table *up* to cover the acquire width. Shrinking the
-        # image/shading window to the old 2517 map sheared Full-window scans.
-        if n > table_n:
-            logger.info(
-                "GL128 shading table pad %d → %d to match window %d..%d",
-                table_n,
-                n,
-                start,
-                end,
-            )
-            table_n = n
         window = {"strpixel": start, "endpixel": end, "dpiset": used_dpiset}
-        declared = declared_shading_size(table_n)
+        declared = declared_shading_size(n)
         self.asic_shading_ready = False
         if infrared:
             self.ir_host_flatten_ready = False
@@ -859,7 +873,7 @@ class Gl128:
             self.apply_frontend(self.last_afe)
 
         # SF: lamp off → ~0.5s → dark → unity → exposure AHB (no slope here) →
-        # lamp on → white with DVDSET|MTRPWR (we also arm AGOHOME to park).
+        # lamp on → white with DVDSET|MTRPWR|AGOHOME (NegPy ORs AGOHOME to park).
         settle_s = IR_SHADING_DARK_SETTLE_S if infrared else COLOR_SHADING_DARK_SETTLE_S
         self.lamp_off()
         self._reassert_lamp_off()
@@ -872,19 +886,12 @@ class Gl128:
         # Colour film USB is chunky (session 11). Do not trust lag on a flat dark
         # field — a false planar pick builds a smooth but wrong table that DVDSET
         # turns into a diamond/moiré. IR may still use lag when needed later.
-        strip_planar = False if not infrared else choose_usb_planar(
-            dark_raw[: max(0, n * 6)], pixels=n
-        )
-        dark_measured = average_rgb16_columns(
-            dark_raw, pixels=n, lines=SHADING_LINES, planar=strip_planar
-        )
-        if table_n > n:
-            dark_measured = list(dark_measured) + [dark_measured[-1]] * (table_n - n)
+        strip_planar = False if not infrared else choose_usb_planar(dark_raw[: max(0, n * 6)], pixels=n)
+        dark_measured = average_rgb16_columns(dark_raw, pixels=n, lines=SHADING_LINES, planar=strip_planar)
         if infrared:
             dark = [(0, 0, 0)] * len(dark_measured)
             logger.info(
-                "GL128 IR shading: zero dark terms (session 05); "
-                "measured dark0=%s (diagnostic only)",
+                "GL128 IR shading: zero dark terms (session 05); measured dark0=%s (diagnostic only)",
                 dark_measured[0],
             )
         else:
@@ -897,10 +904,14 @@ class Gl128:
         unity = make_unity_white_table(dark, declared_size=declared)
         self.upload_shading_table(unity)
 
-        # Session 03/04: exposure tables only between unity and white (no slope).
+        # SF session 04: lamp on → exposure AHB → arm DVDSET (0x22) → white strip.
+        if not infrared:
+            self.lamp_on()
+            self._log_lamp_state(where="shading pre-white")
         self.upload_tables(resolution=resolution, shading=False, slope=False)
-        if self.last_afe is not None:
-            self.apply_frontend(self.last_afe)
+        if not infrared:
+            reg01 = (self._reg_cache.get(r.REG_0x01, 0x22) | r.SHDAREA | r.DVDSET) & ~r.SCAN
+            self._write(r.REG_0x01, reg01)
 
         if infrared:
             self.lamp_on()
@@ -909,8 +920,7 @@ class Gl128:
             reg03 = self.protocol.read_register(r.REG_0x03)
             reg37 = self.protocol.read_register(r.REG_IR)
             logger.info(
-                "GL128 IR white strip illum 0x03=%#04x (LAMPPWR=%s) "
-                "0x37=%#04x (IR_LED=%s)",
+                "GL128 IR white strip illum 0x03=%#04x (LAMPPWR=%s) 0x37=%#04x (IR_LED=%s)",
                 reg03,
                 bool(reg03 & r.LAMPPWR),
                 reg37,
@@ -919,19 +929,12 @@ class Gl128:
             if reg03 & r.LAMPPWR or not (reg37 & r.IR_LED):
                 self._write(r.REG_0x03, r.XPASEL)
                 self._apply_infrared(enabled=True)
-        else:
-            self.lamp_on()
-            self._log_lamp_state(where="shading pre-white")
         time.sleep(0.5)
         # SF session 03: after unity, white strip with 0x01=0x23 (SHDAREA|DVDSET).
-        # Post-unity whites land ~11–13k; raw (DVDSET-off) whites ~40–60k make
-        # DVDSET diamond/moiré on the image.
-        white_raw = self.acquire_shading_strip(
-            resolution=resolution, pixels=n, dvdset=not infrared, **window
-        )
-        white = average_rgb16_columns(
-            white_raw, pixels=n, lines=SHADING_LINES, planar=strip_planar
-        )
+        # At unity gain the ASIC returns ``raw - dark``, so ~50-57k here is the
+        # expected reading; the gains below turn that into the flattening table.
+        white_raw = self.acquire_shading_strip(resolution=resolution, pixels=n, dvdset=not infrared, **window)
+        white = average_rgb16_columns(white_raw, pixels=n, lines=SHADING_LINES, planar=strip_planar)
         raw_white: list[tuple[int, int, int]] | None = None
         self.last_host_calib_dark = None
         self.last_host_calib_white = None
@@ -947,10 +950,7 @@ class Gl128:
                 raw_spread,
                 white[0],
             )
-        if table_n > n:
-            white = list(white) + [white[-1]] * (table_n - n)
-            if raw_white is not None:
-                raw_white = list(raw_white) + [raw_white[-1]] * (table_n - n)
+        gains = shading_gains_from_white(white)
         measured = build_measured_shading_table(dark, white, declared_size=declared)
         self.upload_shading_table(measured)
         self._write(self.registers.REG_0x02, 0x00)
@@ -972,11 +972,10 @@ class Gl128:
                 self.ir_host_flatten_ready = True
                 logger.info(
                     "GL128 IR host flatten ready dpi=%d acquire=%d "
-                    "table=%d window=%d..%d dpiset=%d white0=%s "
+                    "window=%d..%d dpiset=%d white0=%s "
                     "white_mean=%.0f measured_dark0=%s (DVDSET off)",
                     resolution,
                     n,
-                    table_n,
                     start,
                     end,
                     used_dpiset,
@@ -997,72 +996,53 @@ class Gl128:
                     dark_measured[0],
                 )
         else:
-            ok, reason = validate_color_shading_table(
-                dark[:n],
-                white[:n],
-                acquire_width=n,
-            )
+            strip_ok, reason = validate_color_shading_strip(dark[:n], white[:n], acquire_width=n)
+            ok = strip_ok
+            if ok:
+                ok, reason = validate_color_shading_gains(gains[:n])
+            median_gain = sorted(int(c) for row in gains[:n] for c in row)[n * 3 // 2]
             if ok:
                 self.asic_shading_ready = True
                 self.last_color_shading_reject_reason = None
                 logger.info(
-                    "GL128 ASIC shading ready dpi=%d method=%s acquire=%d table=%d window=%d..%d dpiset=%d dark0=%s white0=%s",
+                    "GL128 ASIC shading ready dpi=%d method=%s acquire=%d window=%d..%d "
+                    "dpiset=%d dark0=%s white0=%s gain0=%s median_gain=%.3fx",
                     resolution,
                     self._scan_method,
                     n,
-                    table_n,
                     start,
                     end,
                     used_dpiset,
                     dark[0],
                     white[0],
+                    gains[0],
+                    median_gain / SHADING_GAIN_UNITY,
                 )
             else:
                 self.asic_shading_ready = False
                 self.last_color_shading_reject_reason = reason
-                raw_mean = shading_columns_mean(white[:n])
-                preview = host_unity_preview_mean(dark[:n], white[:n])
-                # Host-fake whites in the ASIC table + DVDSET → diamond skew.
-                # Keep DVDSET off and hand raw strips to host stretch instead.
-                if (
-                    raw_mean > float(COLOR_SHADING_WHITE_MEAN_MAX)
-                    and float(COLOR_SHADING_WHITE_MEAN_MIN)
-                    <= preview
-                    <= float(COLOR_SHADING_WHITE_MEAN_MAX)
-                ):
-                    self.last_host_calib_dark = [
-                        (int(r[0]), int(r[1]), int(r[2])) for r in dark[:n]
-                    ]
-                    self.last_host_calib_white = [
-                        (int(r[0]), int(r[1]), int(r[2])) for r in white[:n]
-                    ]
+                self.upload_shading_table(unity)
+                # Only offer the strips to host stretch when the light path itself
+                # was sane; film or a railed white makes host stretch wrong too.
+                if strip_ok:
+                    self.last_host_calib_dark = [(int(r[0]), int(r[1]), int(r[2])) for r in dark[:n]]
+                    self.last_host_calib_white = [(int(r[0]), int(r[1]), int(r[2])) for r in white[:n]]
                     self.last_color_shading_host_ok = True
-                    self.upload_shading_table(unity)
-                    logger.warning(
-                        "GL128 colour white still raw after DVDSET (mean=%.0f, "
-                        "host_unity_preview=%.0f); ASIC DVDSET left off — "
-                        "host dark/white stretch (arming fake ~12k whites "
-                        "caused diamond skew)",
-                        raw_mean,
-                        preview,
-                    )
-                else:
-                    logger.warning(
-                        "GL128 colour ASIC shading rejected (%s); "
-                        "requested_dvdset=True dpi=%d acquire=%d dark0=%s white0=%s "
-                        "host_unity_preview_mean=%.0f",
-                        reason,
-                        resolution,
-                        n,
-                        dark[0],
-                        white[0],
-                        preview,
-                    )
+                logger.warning(
+                    "GL128 colour ASIC shading rejected (%s); DVDSET left off, unity "
+                    "table restored, host_stretch=%s. dpi=%d acquire=%d "
+                    "dark_mean=%.0f white_mean=%.0f median_gain=%.3fx",
+                    reason,
+                    strip_ok,
+                    resolution,
+                    n,
+                    shading_columns_mean(dark[:n]),
+                    shading_columns_mean(white[:n]),
+                    median_gain / SHADING_GAIN_UNITY,
+                )
         return measured
 
-    def upload_tables(
-        self, *, resolution: int, shading: bool = False, slope: bool = True
-    ) -> None:
+    def upload_tables(self, *, resolution: int, shading: bool = False, slope: bool = True) -> None:
         """Upload motor slope and/or per-channel exposure tables to scanner RAM.
 
         ``shading=True`` loads the slow ramp (session 03 feeds); otherwise the
@@ -1071,9 +1051,7 @@ class Gl128:
         """
         r = self.registers
         if slope:
-            slope_bytes = _u16_table_bytes(
-                SLOPE_TABLE_SLOW if shading else SLOPE_TABLE_FAST
-            )
+            slope_bytes = _u16_table_bytes(SLOPE_TABLE_SLOW if shading else SLOPE_TABLE_FAST)
             self.protocol.write_ahb(r.AHB_SLOPE_SCAN, slope_bytes)
             self.protocol.write_ahb(r.AHB_SLOPE_FAST, slope_bytes)
 
@@ -1082,11 +1060,7 @@ class Gl128:
             self.protocol.write_ahb(addr, exposure)
         logger.debug(
             "GL128 uploaded %s for %d dpi",
-            (
-                "exposure only"
-                if not slope
-                else ("slow slope + exposure" if shading else "fast slope + exposure")
-            ),
+            ("exposure only" if not slope else ("slow slope + exposure" if shading else "fast slope + exposure")),
             resolution,
         )
 
@@ -1194,6 +1168,7 @@ class Gl128:
         SF colour dark is ~1k after ~0.5s off. Mid-scale here means the lamp
         did not extinguish or the head is not on a clear home field.
         """
+
         def _probe_mean() -> float:
             if self.last_afe is not None:
                 self.apply_frontend(self.last_afe)

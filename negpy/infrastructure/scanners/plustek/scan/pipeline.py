@@ -104,9 +104,7 @@ class ImagePipeline:
         height, width, channels = rgb.shape
         groups = height // n
         if groups < 1:
-            raise ValueError(
-                f"Buffer of {height} rows is shorter than one {n}-row group"
-            )
+            raise ValueError(f"Buffer of {height} rows is shorter than one {n}-row group")
         trimmed = rgb[: groups * n].reshape(groups, n, width, channels)
         out = trimmed.mean(axis=1)
         logger.debug("averaged %d rows -> %d (oversample=%d)", height, groups, n)
@@ -177,7 +175,7 @@ class ImagePipeline:
         logger.debug("applied y stagger shifts=%s", shifts)
         return out
 
-    def clamp_host_calib_border_highlights(
+    def clamp_border_highlights(
         self,
         rgb: np.ndarray,
         *,
@@ -187,8 +185,15 @@ class ImagePipeline:
         """Pull Full-window holder chrome down to the film-window highlight peak.
 
         NegPy auto Dmin/bounds treat near-white negative margins as film base;
-        chrome brighter than the framed film makes the positive too dark until
-        the user crops. Interior pixels are unchanged.
+        chrome brighter than the framed film skews the positive until the user
+        crops. Needed on both paths: host stretch maps the home strip to white,
+        and ASIC DVDSET flattens that same chrome to full scale by construction.
+        Interior pixels are unchanged.
+
+        The ceiling is per channel. One joint percentile leaves the margin above
+        the dimmest channel's own film peak, so auto Dmin meters that channel off
+        neutral chrome instead of the orange base and the positive takes the
+        complementary cast (green, when a 27.4k joint ceiling met a 19.3k green).
         """
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError(f"rgb must be HxWx3, got {rgb.shape}")
@@ -197,27 +202,66 @@ class ImagePipeline:
         if region is None:
             return rgb
         ys, xs = region
-        inset_peak = float(np.percentile(rgb[ys, xs], float(peak_percentile)))
-        if inset_peak <= 0:
+        peaks = np.percentile(rgb[ys, xs], float(peak_percentile), axis=(0, 1))
+        if float(peaks.max()) <= 0:
             return rgb
+        peaks = np.maximum(peaks.astype(np.float32), 1.0)
         border = np.ones((h, w), dtype=bool)
         border[ys, xs] = False
         if not border.any():
             return rgb
         out = rgb.astype(np.float32, copy=True)
-        hot = border & (out.max(axis=2) > inset_peak)
+        hot = border & (out > peaks).any(axis=2)
         if not hot.any():
             return rgb
-        out[hot] = np.minimum(out[hot], inset_peak)
-        n_hot = int(hot.sum())
+        out[hot] = np.minimum(out[hot], peaks)
         logger.info(
-            "host calib border highlight clamp inset=%.2f peak_p%.1f=%.0f pixels=%d",
+            "border highlight clamp inset=%.2f peak_p%.1f=(%.0f,%.0f,%.0f) pixels=%d",
             float(inset),
             float(peak_percentile),
-            inset_peak,
-            n_hot,
+            peaks[0],
+            peaks[1],
+            peaks[2],
+            int(hot.sum()),
         )
         return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
+
+    def expose_film_base(
+        self,
+        rgb: np.ndarray,
+        *,
+        source: str,
+        peak_target: int = HOST_CALIB_PEAK_TARGET,
+        peak_percentile: float = HOST_CALIB_PEAK_PERCENTILE,
+    ) -> np.ndarray:
+        """Lift the film window toward sensor white with one scalar gain.
+
+        Both shading paths reference *home* chrome, which is brighter than the
+        light at the scan position, so the negative lands well below full scale
+        (~42% at 1800 dpi) and NegPy meters a thin negative into a washed-bright
+        positive. The gain is scalar and keyed to the brightest channel: a
+        per-channel lift would neutralize the orange mask that inversion needs.
+        """
+        target = int(peak_target)
+        if target <= 0:
+            return rgb
+        h, w, _ = rgb.shape
+        region = self._inset_slice(h, w, HOST_CALIB_BORDER_INSET)
+        sample = rgb[region[0], region[1]] if region is not None else rgb
+        peak = float(np.percentile(sample, float(peak_percentile), axis=(0, 1)).max())
+        if peak <= 1.0 or peak >= float(target) * float(HOST_CALIB_PEAK_TRIGGER):
+            return rgb
+        gain = float(target) / peak
+        logger.info(
+            "%s exposure makeup gain=%.3f peak_p%.1f=%.0f → %d",
+            source,
+            gain,
+            float(peak_percentile),
+            peak,
+            target,
+        )
+        lifted = np.clip(rgb.astype(np.float32) * gain, 0, 65535)
+        return np.clip(np.rint(lifted), 0, 65535).astype(np.uint16)
 
     def apply_host_calib(
         self,
@@ -242,9 +286,7 @@ class ImagePipeline:
         if rgb.ndim != 3 or rgb.shape[2] != 3:
             raise ValueError(f"rgb must be HxWx3, got {rgb.shape}")
         if dark.shape[0] < rgb.shape[1] or dark.shape[1] != 3:
-            raise ValueError(
-                f"calib width {dark.shape} incompatible with image width {rgb.shape[1]}"
-            )
+            raise ValueError(f"calib width {dark.shape} incompatible with image width {rgb.shape[1]}")
 
         dark_f = dark[: rgb.shape[1]].astype(np.float32)
         white_f = white[: rgb.shape[1]].astype(np.float32)
@@ -263,28 +305,14 @@ class ImagePipeline:
             mask = np.broadcast_to(bad, rgb.shape)
             out = np.where(mask, rgb.astype(np.float32), out)
 
-        target = int(peak_target)
-        if target > 0:
-            h, w, _ = out.shape
-            region = self._inset_slice(h, w, HOST_CALIB_BORDER_INSET)
-            sample = out[region[0], region[1]] if region is not None else out
-            peak = float(np.percentile(sample, float(peak_percentile)))
-            trigger = float(target) * float(HOST_CALIB_PEAK_TRIGGER)
-            if peak > 1.0 and peak < trigger:
-                gain = float(target) / peak
-                out = np.clip(out * gain, 0, 65535)
-                logger.info(
-                    "host calib exposure makeup gain=%.3f peak_p%.1f=%.0f → %d",
-                    gain,
-                    float(peak_percentile),
-                    peak,
-                    target,
-                )
-
         stretched = np.clip(np.rint(out), 0, 65535).astype(np.uint16)
-        return self.clamp_host_calib_border_highlights(
-            stretched, peak_percentile=peak_percentile
+        exposed = self.expose_film_base(
+            stretched,
+            source="host calib",
+            peak_target=peak_target,
+            peak_percentile=peak_percentile,
         )
+        return self.clamp_border_highlights(exposed, peak_percentile=peak_percentile)
 
     def assemble(
         self,
@@ -302,6 +330,9 @@ class ImagePipeline:
         rgb = self.apply_host_downsample(rgb, geometry)
         if dark is not None and white is not None:
             rgb = self.apply_host_calib(rgb, dark=dark, white=white)
+        else:
+            rgb = self.expose_film_base(rgb, source="asic shading")
+            rgb = self.clamp_border_highlights(rgb)
         if getattr(self.model, "mirror_x", False):
             rgb = np.ascontiguousarray(rgb[:, ::-1, :])
         return rgb
