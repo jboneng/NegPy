@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import ast
 import sys
 import threading
 import types
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -13,9 +15,9 @@ import pytest
 
 from negpy.infrastructure.scanners.base import ScannerUnavailable, TransientScanError
 from negpy.infrastructure.scanners.params import ScanParams
-from negpy.infrastructure.scanners.plustek.exceptions import ScanCancelled, UsbError
-from negpy.infrastructure.scanners.plustek.image import ScanImage
-from negpy.infrastructure.scanners.plustek.usb.device import (
+from pyopticfilm.exceptions import ScanCancelled, UsbError
+from pyopticfilm.image import ScanImage
+from pyopticfilm.usb.device import (
     PID_OPTICFILM_8200I_SE,
     VID_PLUSTEK,
     UsbDeviceInfo,
@@ -23,8 +25,43 @@ from negpy.infrastructure.scanners.plustek.usb.device import (
 from negpy.infrastructure.scanners.plustek_backend import PlustekBackend
 from negpy.infrastructure.scanners.result import ScanResult
 
+_NEGPY_ROOT = Path(__file__).resolve().parents[2] / "negpy"
+_ADAPTER = _NEGPY_ROOT / "infrastructure" / "scanners" / "plustek_backend.py"
 _DEVICE_ID = "plustek:usb:07b3:1825:002:006"
 _BACKEND = "negpy.infrastructure.scanners.plustek_backend"
+
+
+def _is_driver_module(mod: str) -> bool:
+    if mod == "negpy.infrastructure.scanners.plustek_backend":
+        return False
+    return mod.startswith("pyopticfilm")
+
+
+def _collect_driver_imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                mod = alias.name
+                if _is_driver_module(mod):
+                    hits.append(f"{path.relative_to(_NEGPY_ROOT.parent)}:{node.lineno}:{mod}")
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mod = node.module
+            if _is_driver_module(mod):
+                hits.append(f"{path.relative_to(_NEGPY_ROOT.parent)}:{node.lineno}:{mod}")
+    return hits
+
+
+def test_only_adapter_imports_plustek_driver() -> None:
+    """After extraction, only plustek_backend.py may import pyopticfilm."""
+    offenders: list[str] = []
+    for path in _NEGPY_ROOT.rglob("*.py"):
+        rel = path.relative_to(_NEGPY_ROOT)
+        if rel == Path("infrastructure/scanners/plustek_backend.py"):
+            continue
+        offenders.extend(_collect_driver_imports(path))
+    assert offenders == [], "driver imports outside adapter:\n" + "\n".join(offenders)
 
 
 def _params(**kwargs) -> ScanParams:
@@ -58,7 +95,7 @@ def _patch_enum(monkeypatch, devices: list[UsbDeviceInfo] | None = None) -> None
 
 
 def _fake_scanner(*, progress_steps: int = 0, scan_error: Exception | None = None):
-    from negpy.infrastructure.scanners.plustek.device.model_8200i_se import MODEL_8200I_SE
+    from pyopticfilm.device.model_8200i_se import MODEL_8200I_SE
 
     rgb = np.zeros((8, 8, 3), dtype=np.uint16)
     image = ScanImage(rgb=rgb, dpi=1800, device_model="PLUSTEK OpticFilm 8200i SE")
@@ -96,9 +133,7 @@ def _fake_scanner(*, progress_steps: int = 0, scan_error: Exception | None = Non
     scanner.calibrate = MagicMock(return_value=MagicMock(asic_shading=True, has_asic_blob=True))
     scanner.calibrator = MagicMock()
     scanner.calibrator.find_for_scan.return_value = None
-    scanner.calibrator.ensure_colour_asic_shading = MagicMock(
-        return_value=MagicMock(asic_shading=True, has_asic_blob=True)
-    )
+    scanner.calibrator.ensure_colour_asic_shading = MagicMock(return_value=MagicMock(asic_shading=True, has_asic_blob=True))
     scanner._bringup_motor_armed = True
     scanner.disarm_bringup_motor = MagicMock()
     scanner.arm_bringup_motor = MagicMock()
@@ -140,6 +175,9 @@ def test_backend_list_devices_maps_caps(monkeypatch):
     assert dev.capabilities.auto_exposure is False
     assert dev.capabilities.autofocus is False
     assert dev.capabilities.prescan is True
+    assert dev.capabilities.prescan_dpi == 1200
+    assert dev.capabilities.prescan_mirror_x is True
+    assert dev.capabilities.prescan_default_crop is not None
 
 
 def test_refresh_devices_re_enumerates(monkeypatch):
@@ -167,7 +205,7 @@ def test_unavailable_without_pyusb(monkeypatch):
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(ScannerUnavailable, match="PyUSB"):
+    with pytest.raises(ScannerUnavailable, match="pyopticfilm"):
         PlustekBackend()
 
 

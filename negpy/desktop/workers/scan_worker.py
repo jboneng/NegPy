@@ -38,6 +38,7 @@ class PrescanRequest:
     """One low-DPI full-window colour preview for crop setup (no file write)."""
 
     device_id: str
+    prescan_dpi: int
 
 
 @dataclass(frozen=True)
@@ -312,8 +313,10 @@ class ScanWorker(QObject):
 
     @pyqtSlot(PrescanRequest)
     def run_prescan(self, req: PrescanRequest) -> None:
-        """Full-window colour preview at PRESCAN_DPI; emit RGB without writing a file."""
-        from negpy.infrastructure.scanners.plustek.scan.bringup import PRESCAN_DPI
+        """Full-window colour preview at prescan_dpi; emit RGB without writing a file."""
+        if req.prescan_dpi <= 0:
+            self.prescan_error.emit("Device does not support Prescan")
+            return
 
         with self._state_lock:
             if not self._request_prepared:
@@ -328,7 +331,7 @@ class ScanWorker(QObject):
             else:
                 service = self._ensure_service()
                 params = ScanParams(
-                    dpi=PRESCAN_DPI,
+                    dpi=req.prescan_dpi,
                     depth=16,
                     capture_ir=False,
                     autofocus=False,

@@ -318,7 +318,6 @@ dependencies = [
     { name = "imagecodecs" },
     { name = "imageio" },
     { name = "jinja2" },
-    { name = "libusb-package", marker = "sys_platform == 'win32'" },
     { name = "numba" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
@@ -327,11 +326,21 @@ dependencies = [
     { name = "pyqt6" },
     { name = "pyqt6-charts" },
     { name = "pyserial" },
-    { name = "pyusb" },
     { name = "qtawesome" },
     { name = "rawpy" },
     { name = "tifffile" },
     { name = "wgpu" },
+]
+
+[package.optional-dependencies]
+camera = [
+    { name = "gphoto2", marker = "sys_platform != 'win32'" },
+]
+plustek = [
+    { name = "pyopticfilm" },
+]
+scanner = [
+    { name = "python-sane" },
 ]
 
 [package.dev-dependencies]
@@ -345,30 +354,35 @@ dev = [
     { name = "ruff" },
     { name = "ty" },
 ]
+plustek = [
+    { name = "pyopticfilm" },
+]
 scanner = [
     { name = "python-sane" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "gphoto2", marker = "sys_platform != 'win32' and extra == 'camera'", specifier = ">=2.5" },
     { name = "imagecodecs", specifier = "==2026.6.6" },
     { name = "imageio", specifier = "==2.37.3" },
     { name = "jinja2", specifier = "==3.1.6" },
-    { name = "libusb-package", marker = "sys_platform == 'win32'", specifier = ">=1.0.26" },
     { name = "numba", specifier = "==0.65.1" },
     { name = "numpy", specifier = "==2.4.4" },
     { name = "opencv-python-headless", specifier = "==4.13.0.92" },
     { name = "piexif", specifier = "==1.1.3" },
     { name = "pillow", specifier = "==12.2.0" },
+    { name = "pyopticfilm", marker = "extra == 'plustek'", specifier = ">=1.0" },
     { name = "pyqt6", specifier = "==6.11.0" },
     { name = "pyqt6-charts", specifier = "==6.11.0" },
     { name = "pyserial", specifier = ">=3.5" },
-    { name = "pyusb", specifier = ">=1.2.1" },
+    { name = "python-sane", marker = "extra == 'scanner'", specifier = ">=2.9" },
     { name = "qtawesome", specifier = "==1.4.2" },
     { name = "rawpy", specifier = "==0.27.0" },
     { name = "tifffile", specifier = "==2026.6.1" },
     { name = "wgpu", specifier = "==0.31.1" },
 ]
+provides-extras = ["plustek", "scanner", "camera"]
 
 [package.metadata.requires-dev]
 camera = [{ name = "gphoto2", marker = "sys_platform != 'win32'", specifier = ">=2.5" }]
@@ -379,6 +393,7 @@ dev = [
     { name = "ruff", specifier = "==0.14.10" },
     { name = "ty", specifier = ">=0.0.26" },
 ]
+plustek = [{ name = "pyopticfilm", specifier = ">=1.0" }]
 scanner = [{ name = "python-sane", specifier = ">=2.9" }]
 
 [[package]]
@@ -624,6 +639,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1a/67/f4452d68793fb15beba4f19ef39a38a8822f0da7452b503c400d5a21f5c1/pyinstaller_hooks_contrib-2026.5.tar.gz", hash = "sha256:f066dfca8f7c45ff6336c9cf9fe25b4e48bfeb322a1aa24faaedfb8a8d1b0b08", size = 173689, upload-time = "2026-05-04T22:36:55.124Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f6/5c/fd465d11da4d12b50d7eb5d2ee2ceb780d8d049dbb489f3828d131e387af/pyinstaller_hooks_contrib-2026.5-py3-none-any.whl", hash = "sha256:ea1535783fbdac4626351709e83f3ea80b681d3a4745763ebb407b5e27342eb9", size = 457314, upload-time = "2026-05-04T22:36:53.598Z" },
+]
+
+[[package]]
+name = "pyopticfilm"
+version = "1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "libusb-package", marker = "sys_platform == 'win32'" },
+    { name = "numpy" },
+    { name = "pyusb" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f7/20/96cb1213db06fd5378d0a342eafd20370f3d4862f30e46c125c611843bcc/pyopticfilm-1.1.tar.gz", hash = "sha256:4627c69f09f998e0d126c8b3e2b0de0d1fb167181584297618e67057c4010c17", size = 105732, upload-time = "2026-08-12T08:00:59.88Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e4/b0/a9b09434d8168a3e816cc8d8a093d0ddfa6cab6ab1bd74c1189ed8639d86/pyopticfilm-1.1-py3-none-any.whl", hash = "sha256:78edae9aea85bdee329d35b3263f13afa42ce25e06d309d29ead051bf897fbb4", size = 116784, upload-time = "2026-08-12T08:00:58.433Z" },
 ]
 
 [[package]]

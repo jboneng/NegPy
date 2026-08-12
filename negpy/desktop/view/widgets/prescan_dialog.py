@@ -18,12 +18,7 @@ from negpy.desktop.converters import ImageConverter
 from negpy.desktop.view.widgets.scan_window_label import ScanWindowLabel
 from negpy.desktop.workers.scan_worker import PrescanRequest
 from negpy.infrastructure.scanners.base import ScannerDevice
-from negpy.infrastructure.scanners.plustek.device.model_8200i_se import MODEL_8200I_SE
-from negpy.infrastructure.scanners.plustek.scan.bringup import (
-    default_frame_crop_norm,
-    image_crop_to_scan_area,
-    scan_area_to_image_crop,
-)
+from negpy.infrastructure.scanners.params import crop_to_scan_window
 from negpy.infrastructure.scanners.result import ScanResult
 
 
@@ -58,9 +53,10 @@ class PrescanCropDialog(QDialog):
         super().__init__(parent)
         self._controller = controller
         self._device = device
+        caps = device.capabilities
         # TA / backend space (what ScanParams.window stores).
         self._scan_window: tuple[float, float, float, float] | None = initial_window
-        self._model = MODEL_8200I_SE  # only SE reports caps.prescan today
+        self._prescan_mirror_x = bool(caps.prescan_mirror_x)
         self._busy = False
 
         self.setWindowTitle("Prescan — set crop")
@@ -124,7 +120,12 @@ class PrescanCropDialog(QDialog):
         self._clear_btn.setEnabled(False)
         self._label.set_frame(QPixmap())
         try:
-            self._controller.start_prescan(PrescanRequest(device_id=self._device.id))
+            self._controller.start_prescan(
+                PrescanRequest(
+                    device_id=self._device.id,
+                    prescan_dpi=self._device.capabilities.prescan_dpi,
+                )
+            )
         except Exception as exc:
             self._busy = False
             self._status.setText(str(exc))
@@ -149,10 +150,12 @@ class PrescanCropDialog(QDialog):
         qimg = ImageConverter.to_qimage(u8)
         self._label.set_frame(QPixmap.fromImage(qimg))
         if self._scan_window is None:
-            ta = default_frame_crop_norm(self._model)
-            self._scan_window = ta
-        image_rect = scan_area_to_image_crop(self._model, self._scan_window)
-        self._label.set_window(image_rect)
+            default_crop = self._device.capabilities.prescan_default_crop
+            if default_crop is not None:
+                self._scan_window = default_crop
+        if self._scan_window is not None:
+            image_rect = crop_to_scan_window(self._scan_window, mirror_x=self._prescan_mirror_x)
+            self._label.set_window(image_rect)
         self._ok_btn.setEnabled(True)
         self._status.setText("Drag the rectangle to set the scan crop")
 
@@ -176,7 +179,7 @@ class PrescanCropDialog(QDialog):
         if rect is None:
             self._scan_window = None
             return
-        self._scan_window = image_crop_to_scan_area(self._model, tuple(rect))  # type: ignore[arg-type]
+        self._scan_window = crop_to_scan_window(tuple(rect), mirror_x=self._prescan_mirror_x)  # type: ignore[arg-type]
 
     def _on_clear_crop(self) -> None:
         self._scan_window = None
@@ -196,7 +199,7 @@ class PrescanCropDialog(QDialog):
         # Sync from widget in case the last drag did not emit.
         rect = self._label.window()
         if rect is not None:
-            self._scan_window = image_crop_to_scan_area(self._model, rect)
+            self._scan_window = crop_to_scan_window(rect, mirror_x=self._prescan_mirror_x)
         self._disconnect_controller()
         super().accept()
 

@@ -77,6 +77,9 @@ SE_CAPS = ScannerCapabilities(
     sources=(ScanMode.TRANSPARENCY,),
     max_area_mm=(36.33, 25.0),
     prescan=True,
+    prescan_dpi=1200,
+    prescan_mirror_x=True,
+    prescan_default_crop=(0.0, 0.35, 1.0, 0.65),
 )
 SE_DEVICE = ScannerDevice(
     id="plustek:usb:07b3:1825:002:006",

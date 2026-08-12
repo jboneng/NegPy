@@ -38,7 +38,7 @@ It is built with **Python**, running natively on Linux, macOS, and Windows.
 
 **Capture & Input**
 *   **Camera Scanning**: Capture negatives with a tethered camera straight into NegPy — a single RAW, or automated red/green/blue narrowband triplets driven by an RGB [Scanlight](https://github.com/jackw01/scanlight) that feed the RGB Scan merge. macOS/Linux, optional dependency. [Camera Scanning guide](docs/CAMERA_SCANNING.md)
-*   **Scanner Support**: Direct control of film scanners — SANE on Linux/macOS (Coolscans, many Plusteks, and others), and an in-tree USB backend for the Plustek OpticFilm 8200i SE (Windows/macOS/Linux)
+*   **Scanner Support**: Direct control of film scanners — SANE on Linux/macOS (Coolscans, many Plusteks, and others), and the [pyopticfilm](https://github.com/jboneng/pyopticfilm) USB backend for the Plustek OpticFilm 8200i SE (Windows/macOS/Linux)
 *   **RGB Scan (Trichromatic Capture)**: Merge three narrowband red/green/blue exposures of one negative into a single low-noise colour scan, with automatic sub-pixel alignment to kill fringing.
 *   **Flat-Field Correction**: Correct illumination falloff / vignetting from your light source or scanner via a reference scan of the bare light. Named profiles, toggle per image.
 *   **File Support**: Standard RAWs/TIFFs plus specialized formats like Kodak Pakon scanner raw files.
@@ -116,7 +116,7 @@ brew install libgphoto2
 1. Run the installer (ignore the warnings)
 2. Start the app and click through the warnings.
 
-**Scanner support (Plustek OpticFilm 8200i SE)** uses NegPy’s in-tree USB driver. Bind the scanner to WinUSB with [Zadig](https://zadig.akeo.ie/) (replace the vendor/SilverFast driver for `07b3:1825`). PyUSB is included with NegPy; Windows builds also ship a bundled libusb. See [docs/PLUSTEK_WINDOWS.md](docs/PLUSTEK_WINDOWS.md). Only the 8200i SE is scan-ready today. Camera scanning is still unavailable on Windows (libgphoto2 has no Windows build).
+**Scanner support (Plustek OpticFilm 8200i SE)** uses the optional `pyopticfilm` driver (`uv sync --group plustek` or `pip install negpy[plustek]`). Bind the scanner to WinUSB with [Zadig](https://zadig.akeo.ie/) (replace the vendor/SilverFast driver for `07b3:1825`). Windows release builds bundle pyopticfilm, PyUSB, and libusb. See [docs/PLUSTEK_WINDOWS.md](docs/PLUSTEK_WINDOWS.md). Only the 8200i SE is scan-ready today. Camera scanning is still unavailable on Windows (libgphoto2 has no Windows build).
 
 ---
 

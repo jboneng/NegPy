@@ -3,7 +3,7 @@
 import cv2
 import numpy as np
 
-from negpy.infrastructure.scanners.plustek.ir_align import align_ir_to_rgb
+from pyopticfilm.ir_align import align_ir_to_rgb
 
 
 def _texture(h=128, w=128, seed=0):

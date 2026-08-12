@@ -487,9 +487,7 @@ class ScanSidebar(QWidget):
         self.autofocus_check.setVisible(self._caps_autofocus)
         if self._caps_autofocus:
             self.autofocus_check.setChecked(self._settings.autofocus)
-            self.autofocus_check.setToolTip(
-                "Autofocus before scanning (film is rarely perfectly flat)"
-            )
+            self.autofocus_check.setToolTip("Autofocus before scanning (film is rarely perfectly flat)")
         else:
             self.autofocus_check.setChecked(False)
         self.autofocus_check.blockSignals(False)

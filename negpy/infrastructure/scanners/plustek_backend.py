@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""NegPy ``ScannerBackend`` for the in-tree Plustek USB driver."""
+"""NegPy ``ScannerBackend`` adapter for the pyopticfilm Plustek USB driver."""
 
 from __future__ import annotations
 
@@ -18,23 +18,26 @@ from negpy.infrastructure.scanners.base import (
     TransientScanError,
 )
 from negpy.infrastructure.scanners.params import ScanMode, ScanParams
-from negpy.infrastructure.scanners.plustek.device.select import model_for_device, model_is_scan_ready
-from negpy.infrastructure.scanners.plustek.exceptions import (
+from pyopticfilm.device.select import model_for_device, model_is_scan_ready
+from pyopticfilm.exceptions import (
     DeviceNotFoundError,
     DriverBindingError,
     PlustekError,
     ScanCancelled,
     UsbError,
 )
-from negpy.infrastructure.scanners.plustek.logging import get_logger
-from negpy.infrastructure.scanners.plustek.scanner import Scanner
-from negpy.infrastructure.scanners.plustek.usb.device import UsbDeviceInfo, find_devices, list_devices
+from pyopticfilm.logging import get_logger
+from pyopticfilm.scanner import Scanner
+from pyopticfilm.usb.device import UsbDeviceInfo, find_devices, list_devices
 from negpy.infrastructure.scanners.result import ScanResult
 
 logger = get_logger(__name__)
 
 
 def _caps_for(model: Any) -> ScannerCapabilities:
+    prescan_ready = bool(getattr(model, "scan_ready", False))
+    from pyopticfilm.scan.bringup import PRESCAN_DPI, default_frame_crop_norm
+
     return ScannerCapabilities(
         ir_channel=model.supports_infrared,
         supported_dpi=tuple(sorted(model.resolutions_dpi)),
@@ -43,7 +46,10 @@ def _caps_for(model: Any) -> ScannerCapabilities:
         max_area_mm=model.max_area_mm,
         auto_exposure=False,
         autofocus=False,
-        prescan=bool(getattr(model, "scan_ready", False)),
+        prescan=prescan_ready,
+        prescan_dpi=PRESCAN_DPI if prescan_ready else 0,
+        prescan_mirror_x=bool(getattr(model, "mirror_x", False)) if prescan_ready else False,
+        prescan_default_crop=default_frame_crop_norm(model) if prescan_ready else None,
         adapter_frame_capacity=None,
         adapter_frame_control=False,
         can_eject=False,
@@ -70,7 +76,7 @@ def _safe_progress(progress: Callable[[float], None] | None, value: float) -> No
 
 
 def _validate_params(params: ScanParams, *, model: Any | None = None) -> None:
-    from negpy.infrastructure.scanners.plustek.device.model_8200i import MODEL_8200I
+    from pyopticfilm.device.model_8200i import MODEL_8200I
 
     dpi = int(params.dpi)
     depth = int(params.depth)
@@ -149,8 +155,7 @@ class PlustekBackend:
             import usb.core  # noqa: F401
         except ImportError as exc:
             raise ScannerUnavailable(
-                "Plustek USB needs PyUSB. Reinstall NegPy dependencies "
-                "(pyusb is a core dependency). "
+                "Plustek USB needs pyopticfilm (uv sync --group plustek). "
                 "On Windows, bind WinUSB with Zadig for OpticFilm 8200i SE (07b3:1825) — "
                 "see docs/PLUSTEK_WINDOWS.md."
             ) from exc
@@ -323,16 +328,16 @@ class PlustekBackend:
         if cancel.is_set():
             raise RuntimeError("Scan cancelled before start")
         _safe_progress(progress, 0.02)
-        from negpy.infrastructure.scanners.plustek.exceptions import CalibrationError
-        from negpy.infrastructure.scanners.plustek.scan.geometry import ScanGeometry
+        from pyopticfilm.exceptions import CalibrationError
+        from pyopticfilm.scan.geometry import ScanGeometry
 
         geo = geometry if isinstance(geometry, ScanGeometry) else None
         if geo is None and window is not None:
-            from negpy.infrastructure.scanners.plustek.scan.geometry import compute_geometry
+            from pyopticfilm.scan.geometry import compute_geometry
 
             geo = compute_geometry(dpi, model=scanner.model, area=window)
         if geo is None:
-            from negpy.infrastructure.scanners.plustek.scan.bringup import (
+            from pyopticfilm.scan.bringup import (
                 bringup_scan_geometry,
                 is_opticfilm_8200i_se,
             )
@@ -346,11 +351,7 @@ class PlustekBackend:
         asic = scanner.asic
         calibrator = scanner.calibrator
         hit = calibrator.find_for_scan(method="transparency", geometry=geo)
-        if (
-            hit is not None
-            and hit.has_asic_blob
-            and getattr(asic, "asic_shading_ready", False)
-        ):
+        if hit is not None and hit.has_asic_blob and getattr(asic, "asic_shading_ready", False):
             _safe_progress(progress, 0.1)
             return
 
@@ -379,7 +380,7 @@ class PlustekBackend:
         window: tuple[float, float, float, float] | None,
     ) -> object | None:
         """Lab Full-window or crop geometry for SE (forced geometry into scan)."""
-        from negpy.infrastructure.scanners.plustek.scan.bringup import (
+        from pyopticfilm.scan.bringup import (
             bringup_scan_geometry,
             crop_scan_geometry,
             is_opticfilm_8200i_se,
@@ -436,7 +437,7 @@ class PlustekBackend:
             cancel=cancel,
         )
         ir_plane = ir_img.ir if ir_img.ir is not None else ir_img.rgb[:, :, 1].copy()
-        from negpy.infrastructure.scanners.plustek.ir_align import align_ir_to_rgb
+        from pyopticfilm.ir_align import align_ir_to_rgb
 
         ir_plane = align_ir_to_rgb(np.asarray(color.rgb), np.asarray(ir_plane))
         return color, ir_plane

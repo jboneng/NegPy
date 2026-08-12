@@ -1,13 +1,13 @@
 # Windows USB setup (Plustek OpticFilm)
 
-NegPy’s in-tree Plustek USB driver talks to the OpticFilm **8200i SE** over raw USB (libusb via PyUSB). The stock Plustek Windows driver must not own the device.
+NegPy’s Plustek USB backend uses the external [pyopticfilm](https://github.com/jboneng/pyopticfilm) driver (libusb via PyUSB). The stock Plustek Windows driver must not own the device.
 
 ## Requirements
 
 - Windows 10/11
 - OpticFilm **8200i SE** (`07B3:1825`, GL128) — the only model validated for scan
 - WinUSB (or libusbK) bound via [Zadig](https://zadig.akeo.ie/)
-- NegPy with its normal dependencies (`pyusb` is core; Windows also ships `libusb-package`)
+- NegPy with the `plustek` optional dependency (`uv sync --group plustek` or `pip install negpy[plustek]`); Windows also pulls `libusb-package` via pyopticfilm
 
 ## 1. Confirm the device
 
@@ -33,11 +33,11 @@ From a source checkout:
 
 ```powershell
 cd path\to\NegPy
-uv sync
+uv sync --group plustek
 make run
 ```
 
-Or use a Windows release build (PyUSB and libusb are bundled). In the Scan tab, Backend should be **Plustek (USB)**. Refresh the device list; the SE should appear when WinUSB is bound.
+Or use a Windows release build (pyopticfilm, PyUSB, and libusb are bundled). In the Scan tab, Backend should be **Plustek (USB)**. Refresh the device list; the SE should appear when WinUSB is bound.
 
 ## 4. Restoring the vendor driver
 
@@ -53,7 +53,7 @@ Or use a Windows release build (PyUSB and libusb are bundled). In the Scan tab, 
 | Empty device list | Wrong PID, unplugged, or still on vendor driver |
 | `DriverBindingError` / access denied | WinUSB not bound; another app has the handle |
 | `UsbError` / link failures | Cable/hub; try a direct motherboard port |
-| UI hints at missing USB / PyUSB | Broken install — reinstall NegPy; Windows builds ship PyUSB + libusb |
+| UI hints at missing USB / PyUSB | Install the plustek group: `uv sync --group plustek` |
 | First scan at a DPI takes a few seconds | Normal — AFE + one dark + one white shading strip (same choreography as SilverFast), then cached per resolution |
 | ASIC shading ready (preferred) | Log shows a colour white mean ~50–57k and `median_gain` ~1.1–1.7x, then `ASIC shading ready`, image `shading=True` / DVDSET on. Delete `plustek_calib` and rescan after driver changes so calib is remeasured |
 | Colour white mean ~50–57k | Normal. At unity gain DVDSET returns `raw − dark`, so a bright strip reads near full scale. The 11–13k figures in the captures are the *gains* SilverFast computed from it (`0x2000` = 1.0), not white levels |

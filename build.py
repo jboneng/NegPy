@@ -69,8 +69,10 @@ params = [
             "--hidden-import=usb.core",
             "--hidden-import=usb.backend.libusb1",
             "--hidden-import=libusb_package",
+            "--hidden-import=pyopticfilm",
             "--collect-all=usb",
             "--collect-all=libusb_package",
+            "--collect-all=pyopticfilm",
         ]
         if is_windows
         else []

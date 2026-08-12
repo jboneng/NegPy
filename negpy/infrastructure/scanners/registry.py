@@ -16,7 +16,7 @@ def _make_plustek() -> ScannerBackend:
         from negpy.infrastructure.scanners.plustek_backend import PlustekBackend
     except ImportError as exc:
         raise ScannerUnavailable(
-            "Plustek USB backend failed to import. "
+            "Plustek USB backend failed to import. Install with: uv sync --group plustek. "
             "On Windows, bind WinUSB with Zadig for OpticFilm 8200i SE (07b3:1825) — "
             "see docs/PLUSTEK_WINDOWS.md."
         ) from exc
