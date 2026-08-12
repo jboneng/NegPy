@@ -643,16 +643,16 @@ wheels = [
 
 [[package]]
 name = "pyopticfilm"
-version = "1.1"
+version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "libusb-package", marker = "sys_platform == 'win32'" },
     { name = "numpy" },
     { name = "pyusb" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/20/96cb1213db06fd5378d0a342eafd20370f3d4862f30e46c125c611843bcc/pyopticfilm-1.1.tar.gz", hash = "sha256:4627c69f09f998e0d126c8b3e2b0de0d1fb167181584297618e67057c4010c17", size = 105732, upload-time = "2026-08-12T08:00:59.88Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/47/c2/2de6d124d7b716e6d2e83b118239f1e3e9c76cd5f2c686d7963feb814b73/pyopticfilm-1.1.1.tar.gz", hash = "sha256:30f9e243f101173636e7adec0fe604a7fcd165f2992b412f0868f76904b551c8", size = 114128, upload-time = "2026-08-12T19:34:30.75Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/b0/a9b09434d8168a3e816cc8d8a093d0ddfa6cab6ab1bd74c1189ed8639d86/pyopticfilm-1.1-py3-none-any.whl", hash = "sha256:78edae9aea85bdee329d35b3263f13afa42ce25e06d309d29ead051bf897fbb4", size = 116784, upload-time = "2026-08-12T08:00:58.433Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/7a/df1ee2d844a237710733b087e8c38f12af9fa8a4826853806bad0dd8fdd6/pyopticfilm-1.1.1-py3-none-any.whl", hash = "sha256:c04562cec868b7bb8d1086cacd59711c68ac90a3140d3da4c52ce23369a8a718", size = 121240, upload-time = "2026-08-12T19:34:29.595Z" },
 ]
 
 [[package]]
