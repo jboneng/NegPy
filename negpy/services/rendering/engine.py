@@ -15,10 +15,12 @@ from negpy.features.exposure.processor import (
     PhotometricProcessor,
 )
 from negpy.features.process.hue import apply_hue_trim
+from negpy.features.exposure.papers import effective_paper_profile
+from negpy.features.cyanotype.processor import CyanotypeProcessor
+from negpy.features.lith.processor import LithProcessor
 from negpy.features.toning.processor import ToningProcessor
 from negpy.features.lab.logic import apply_clahe
 from negpy.features.lab.processor import PhotoLabProcessor
-from negpy.features.retouch.processor import RetouchProcessor
 from negpy.features.finish.processor import FinishProcessor
 from negpy.kernel.system.config import APP_CONFIG
 from negpy.services.view.coordinate_mapping import CoordinateMapping
@@ -86,7 +88,6 @@ class DarkroomEngine:
             self.cache.base = None
             self.cache.exposure = None
             self.cache.clahe = None
-            self.cache.retouch = None
             self.cache.lab = None
             pipeline_changed = True
 
@@ -107,7 +108,7 @@ class DarkroomEngine:
         # fields (manual_crop_rect, auto_crop_*) only feed context.active_roi, which
         # is itself unused for output in that mode (CropProcessor and uv_grid ROI
         # slicing are both bypassed) - keying on them would force a full base/
-        # exposure/retouch/lab/local recompute on every crop-rect drag step.
+        # exposure/clahe/lab/local recompute on every crop-rect drag step.
         geometry_key = (
             (
                 settings.geometry.rotation,
@@ -145,6 +146,7 @@ class DarkroomEngine:
             settings.process.black_point_trim_blue,
             settings.process.crosstalk_strength,
             settings.process.crosstalk_matrix,
+            settings.process.crosstalk_process,
             settings.process.lock_bounds,
             distortion_k1,
             # Auto Density metering reads retuned targets from EXPOSURE_CONSTANTS,
@@ -155,7 +157,7 @@ class DarkroomEngine:
         current_img, pipeline_changed = self._run_stage(current_img, base_key, "base", run_base, context, pipeline_changed)
 
         def run_exposure(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
-            img_out = PhotometricProcessor(settings.exposure, settings.local).process(img_in, ctx)
+            img_out = PhotometricProcessor(settings.exposure, settings.local, settings.process).process(img_in, ctx)
             # Rides this stage: it needs the print, and its own stage would re-run everything
             # behind it on a drag. Stays inside the flat intent below (capture fix, not a look).
             return apply_hue_trim(img_out, settings.process.hue_trim)
@@ -171,7 +173,7 @@ class DarkroomEngine:
         )
 
         # Flat (digital-intermediate) master: keep only geometry + mask-neutralized
-        # inversion, then crop. All creative stages (retouch, lab, local, toning,
+        # inversion, then crop. All creative stages (lab, local, toning,
         # finish) are bypassed so the export holds maximal editing latitude.
         flat_intent = settings.exposure.render_intent == RenderIntent.FLAT
 
@@ -181,7 +183,7 @@ class DarkroomEngine:
                 return apply_clahe(img_in, settings.lab.clahe_strength)
 
             # Keyed on the bare float: the full settings.lab would wrongly invalidate
-            # this stage (and retouch/lab behind it) on saturation/sharpen edits.
+            # this stage (and lab behind it) on saturation/sharpen edits.
             current_img, pipeline_changed = self._run_stage(
                 current_img,
                 settings.lab.clahe_strength,
@@ -191,24 +193,16 @@ class DarkroomEngine:
                 pipeline_changed,
             )
 
-            def run_retouch(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
-                return RetouchProcessor(settings.retouch).process(img_in, ctx)
-
-            current_img, pipeline_changed = self._run_stage(
-                current_img,
-                settings.retouch,
-                "retouch",
-                run_retouch,
-                context,
-                pipeline_changed,
-            )
-
             def run_lab(img_in: ImageBuffer, ctx: PipelineContext) -> ImageBuffer:
                 return PhotoLabProcessor(settings.lab).process(img_in, ctx)
 
             current_img, pipeline_changed = self._run_stage(current_img, settings.lab, "lab", run_lab, context, pipeline_changed)
 
-            current_img = ToningProcessor(settings.toning).process(current_img, context)
+            lith_paper = effective_paper_profile(settings.exposure.paper_profile, settings.process.process_mode)
+            current_img = LithProcessor(settings.altproc, lith_paper).process(current_img, context)
+            current_img = CyanotypeProcessor(settings.altproc).process(current_img, context)
+
+            current_img = ToningProcessor(settings.toning, settings.altproc.alt_process).process(current_img, context)
 
         if not context.crop_preview_full:
             current_img = CropProcessor(settings.geometry).process(current_img, context)

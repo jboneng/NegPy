@@ -146,6 +146,17 @@ CATALOG: list[tuple[str, tuple[SettingRow, ...]]] = [
         _row("Glow", "lab", "glow_amount"),
         _row("Halation", "lab", "halation_strength"),
     )),
+    ("Alternative Processes", (
+        _row("Process", "altproc", "alt_process"),
+        _row("Lith Exposure", "altproc", "lith_exposure"),
+        _row("Snatch Point", "altproc", "lith_snatch"),
+        _row("Abruptness", "altproc", "lith_abruptness"),
+        _row("Sensitiser", "altproc", "cyano_sensitizer"),
+        _row("Cyanotype Exposure", "altproc", "cyano_exposure"),
+        _row("Exposure Scale", "altproc", "cyano_scale"),
+        _row("Bleach", "altproc", "cyano_bleach"),
+        _row("Tannin", "altproc", "cyano_tannin"),
+    )),
     ("Toning", (
         _row("Selenium", "toning", "selenium_strength"),
         _row("Sepia", "toning", "sepia_strength"),

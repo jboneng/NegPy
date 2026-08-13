@@ -26,6 +26,8 @@ from negpy.features.flatfield.models import FlatFieldConfig
 from negpy.features.geometry.models import GeometryConfig
 from negpy.features.process.models import ProcessConfig
 from negpy.features.process.sensor import apply_sensor_correction
+from negpy.features.hdr.logic import merge_bracket
+from negpy.features.hdr.models import HdrConfig, hdr_active
 from negpy.features.rgbscan.logic import merge_rgb_triplet
 from negpy.features.rgbscan.models import RgbScanConfig, is_rgb_triplet
 from negpy.features.stitch.logic import stitch_composite
@@ -40,6 +42,7 @@ from negpy.infrastructure.loaders.rawpy_loader import (
     _find_linearraw_page,
     _is_dng,
     _peek_hdri_ir_page,
+    _peek_linear_dng_rgb,
     _peek_linearraw_4ch,
 )
 from negpy.kernel.image.logic import _to_uint16_jit, apply_exif_orientation, ensure_rgb, uint16_to_float32
@@ -279,7 +282,7 @@ def _apply_ice(rgb: np.ndarray, ir: np.ndarray, retouch: RetouchConfig) -> np.nd
 
     from negpy.features.retouch.logic import (
         apply_ir_attenuation,
-        apply_ir_reconstruction,
+        apply_score_repair,
         downsample_ir,
         ir_defect_score,
         ir_detect_cutoff,
@@ -302,7 +305,7 @@ def _apply_ice(rgb: np.ndarray, ir: np.ndarray, retouch: RetouchConfig) -> np.nd
         return rgb
     score_det = ir_defect_score(ratio_det, ir_detect_cutoff(retouch.ir_threshold, retouch.ir_attenuation))
     out = apply_ir_attenuation(rgb, gain_det) if retouch.ir_attenuation else rgb
-    out = apply_ir_reconstruction(out, score_det)
+    out = apply_score_repair(out, score_det)
     return out
 
 
@@ -312,6 +315,7 @@ def _decode_linear(
     expansion: Optional[float] = None,
     rgbscan: Optional[RgbScanConfig] = None,
     stitch: Optional[StitchConfig] = None,
+    hdr: Optional[HdrConfig] = None,
     flatfield: Optional[FlatFieldConfig] = None,
     process: Optional[ProcessConfig] = None,
     apply_wb: bool = False,
@@ -325,6 +329,18 @@ def _decode_linear(
         if apply_wb and wb is not None:
             rgb = _apply_white_balance(rgb, wb)
         return rgb, ir, wb, meta
+    # Ahead of every per-format branch below: each of those returns, so a bracket of
+    # anything but plain camera RAW would otherwise export as its unmerged reference
+    # frame — the canvas merged, the file did not, and nothing said so.
+    if hdr is not None and hdr_active(hdr):
+        rgb, wb, meta = _decode_hdr(file_path, hdr, geometry, expansion=expansion, gamma_key=gamma_key)
+        if apply_flatfield and flatfield is not None:
+            rgb = _apply_flatfield_correction(rgb, flatfield)
+        if apply_sensor and process is not None and process.sensor_matrix is not None:
+            rgb = apply_sensor_correction(rgb, process.sensor_matrix)
+        if apply_wb and wb is not None:
+            rgb = _apply_white_balance(rgb, wb)
+        return rgb, None, wb, meta
     if PakonLoader.can_handle(file_path):
         rgb, ir = _decode_pakon(file_path, geometry, expansion=expansion)
         meta = _SourceMeta(make="Pakon", model=_pakon_spec_desc(file_path))
@@ -549,29 +565,30 @@ def _decode_dng(
         ir = _apply_geometry(ir, orientation, geometry)
         return rgb, ir
 
-    # 3-channel LinearRaw (SilverFast HDRi): read directly via tifffile.
+    # 3-channel LinearRaw (SilverFast HDRi, and DNG 1.7 JPEG-XL from DxO
+    # PhotoLab/PureRAW and Lightroom Enhance): same tag-aware decode as the
+    # RawpyLoader import fallback, so BlackLevel/WhiteLevel/LinearizationTable
+    # get applied here too (see _peek_linear_dng_rgb). It returns [0,1]-clamped
+    # data or raises; wrap so callers still see ValueError, not a raw tifffile/
+    # imagecodecs/numpy exception, on failure.
     try:
-        with _tifffile.TiffFile(file_path) as tif:
-            page = _find_linearraw_page(tif, samples=3)
-            if page is None:
-                raise ValueError(f"No LinearRaw IFD found in {file_path}")
-            arr = page.asarray()
-    except ValueError:
-        raise
+        peeked_3ch = _peek_linear_dng_rgb(file_path)
     except Exception as e:
         raise ValueError(f"Failed to read LinearRaw data from {file_path}: {e}") from e
-
-    if arr.dtype == np.uint16:
-        scale = 1.0 / 65535.0
-    elif arr.dtype == np.uint8:
-        scale = 1.0 / 255.0
-    else:
-        scale = 1.0
-    rgb = np.clip(arr.astype(np.float32) * scale, 0.0, 1.0)
+    if peeked_3ch is None:
+        raise ValueError(f"No LinearRaw IFD found in {file_path}")
+    rgb, _wb_gains = peeked_3ch
     if expansion is not None and expansion > 1.0:
         rgb = np.clip(rgb * expansion, 0.0, 1.0)
 
     ir = _peek_hdri_ir_page(file_path)
+    if ir is not None and ir.shape[:2] != rgb.shape[:2]:
+        # DefaultCrop* trimmed rgb but the HDRi IR page is still full sensor
+        # size. Fail loudly instead of pairing misaligned planes on export.
+        raise ValueError(
+            f"LinearRaw RGB {rgb.shape[:2]} and IR plane {ir.shape[:2]} size "
+            f"mismatch in {file_path} (DefaultCrop* tag with an HDRi IR page?)"
+        )
     orientation = read_orientation(file_path)
     rgb = _apply_geometry(rgb, orientation, geometry)
     if ir is not None:
@@ -617,6 +634,43 @@ def _decode_camera_raw(file_path: str, geometry: Optional[GeometryConfig] = None
     if geometry is not None:
         f32 = _apply_user_geometry(f32, geometry)
     return f32, None, wb, meta
+
+
+def _decode_hdr(
+    file_path: str,
+    hdr: HdrConfig,
+    geometry: Optional[GeometryConfig] = None,
+    expansion: Optional[float] = None,
+    gamma_key: str = "linear",
+) -> tuple[np.ndarray, Optional[_CameraWB], _SourceMeta]:
+    """Decode a bracket and merge it into one buffer, in the reference frame's units.
+
+    file_path is the reference, and every frame goes back through `_decode_linear` so a
+    bracket decodes exactly as its frames do on their own — whatever the format. Source
+    corrections are left to the caller: they belong after the merge, since the decode pins
+    the white level the merge's thresholds key on.
+
+    Geometry is applied once, to the merged result, so registration is not fighting a
+    per-frame rotation. Frames are pulled one at a time by merge_bracket — a full-res
+    bracket held all at once is several GB.
+    """
+
+    reference_f32, _, wb, meta = _decode_linear(file_path, expansion=expansion, gamma_key=gamma_key)
+
+    def _decode(path: str) -> np.ndarray:
+        # The reference is already decoded; only the siblings are pulled, one at a time.
+        return reference_f32 if path == file_path else _decode_linear(path, expansion=expansion, gamma_key=gamma_key)[0]
+
+    file_meta = _read_source_meta_tiff(file_path)
+    merged_meta = _SourceMeta(
+        make=file_meta.make or meta.make,
+        model=file_meta.model or meta.model,
+        datetime=file_meta.datetime or meta.datetime,
+    )
+    f32 = merge_bracket(_decode, file_path, hdr.hdr_paths, hdr.hdr_ratios, align=hdr.hdr_align, anchor_path=hdr.hdr_anchor)
+    if geometry is not None:
+        f32 = _apply_user_geometry(f32, geometry)
+    return f32, wb, merged_meta
 
 
 def _decode_camera_raw_triplet(
@@ -972,6 +1026,7 @@ def export_linear_output(
     expansion: Optional[float] = None,
     rgbscan: Optional[RgbScanConfig] = None,
     stitch: Optional[StitchConfig] = None,
+    hdr: Optional[HdrConfig] = None,
     flatfield: Optional[FlatFieldConfig] = None,
     process: Optional[ProcessConfig] = None,
     apply_wb: bool = False,
@@ -1000,6 +1055,7 @@ def export_linear_output(
         expansion=expansion,
         rgbscan=rgbscan,
         stitch=stitch,
+        hdr=hdr,
         flatfield=flatfield,
         process=process,
         apply_wb=apply_wb,

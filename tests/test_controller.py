@@ -11,7 +11,15 @@ from PyQt6.QtWidgets import QApplication
 from negpy.desktop.controller import AppController
 from negpy.desktop.session import DesktopSessionManager, AppState, ToolMode
 from negpy.desktop.workers.export import ExportTask, resolve_export_target_path
-from negpy.domain.models import ColorSpace, ExportConfig, ExportFormat, ExportPreset, ExportPresetOutputMode, WorkspaceConfig
+from negpy.domain.models import (
+    ColorSpace,
+    ExportConfig,
+    ExportFormat,
+    ExportPreset,
+    ExportPresetOutputMode,
+    ExportResolutionMode,
+    WorkspaceConfig,
+)
 from negpy.infrastructure.scanners.params import ScanParams
 from negpy.services.rendering.preview_manager import PreviewManager
 
@@ -252,7 +260,7 @@ class TestAppController(unittest.TestCase):
         state.config = dc_replace(
             state.config, rgbscan=RgbScanConfig(enabled=True, green_path="/tmp/_DSC1317.NEF", blue_path="/tmp/_DSC1318.NEF")
         )
-        state.last_metrics = {"base_positive": np.zeros((2, 2, 3), dtype=np.float32)}
+        state.last_metrics = {"base_positive": np.zeros((2, 2, 3), dtype=np.float32), "source_hash": "h1"}
 
         captured = {}
         self.controller.thumbnail_update_requested.connect(lambda task: captured.setdefault("task", task))
@@ -383,6 +391,30 @@ class TestAppController(unittest.TestCase):
         self.assertTrue(path.endswith(os.path.join("icc", "RGBScan.icc")))
         self.assertTrue(os.path.exists(path))
 
+        state.icc_input_path = "/custom.icc"
+        self.assertEqual(self.controller.effective_input_icc(), "/custom.icc")
+
+    def test_narrowband_profile_suppressed_by_transparency_transfer(self):
+        """E-6 with Normalize off has already reached the working space via the camera
+        matrix, so the implicit RGBScan input profile would be a competing transform.
+        Narrowband is a sticky setting, so this must hold without the user touching it."""
+        from negpy.features.process.models import ProcessMode
+
+        state = self.controller.state
+        state.config = replace(state.config, process=replace(state.config.process, narrowband_scan=True))
+        self.assertIsNotNone(self.controller.effective_input_icc())
+
+        # E-6 with Normalize ON keeps it — that path is unchanged.
+        state.config = replace(state.config, process=replace(state.config.process, process_mode=ProcessMode.E6, e6_normalize=True))
+        self.assertIsNotNone(self.controller.effective_input_icc())
+
+        state.config = replace(state.config, process=replace(state.config.process, e6_normalize=False))
+        self.assertIsNone(self.controller.effective_input_icc())
+        # ...and the preview must not claim a proof it no longer applies.
+        state.soft_proof_enabled = False
+        self.assertFalse(self.controller.proof_active())
+
+        # An explicit Input ICC is a deliberate choice about the source and still wins.
         state.icc_input_path = "/custom.icc"
         self.assertEqual(self.controller.effective_input_icc(), "/custom.icc")
 
@@ -979,25 +1011,28 @@ class TestBatchExportFiltering(unittest.TestCase):
         tasks = self._captured_tasks()
         self.assertEqual([t.file_info["name"] for t in tasks], ["scan.tif", "IMG_0001.cr2"])
 
-    def test_export_all_override_settings_applies_current_export_to_all(self):
+    def test_export_all_applies_current_export_to_all(self):
         self.visible_indices = [0, 1]
         self.controller.state.config = replace(
             self.controller.state.config,
             export=replace(self.controller.state.config.export, export_path="/orig"),
         )
-        self.controller.request_batch_export(override_settings=True)
+        self.controller.request_batch_export()
         tasks = self._captured_tasks()
         for t in tasks:
             self.assertEqual(t.params.export.export_path, "/tmp/out")
 
-    def test_export_all_saved_overrides_path_with_session_values(self):
-        """all_saved scope uses session path/mode/format even when per-file configs are stale."""
+    def test_batch_export_ignores_stale_per_file_export_settings(self):
+        """A frame's saved export block never overrides the panel (issue #750: batch
+        exports came out at the stale 2000px target while the panel said Original)."""
         self.visible_indices = [0, 1]
-        session_export = self.controller.state.config.export
-        # Per-file config has stale SAME_AS_SOURCE (differs from session default
-        # ABSOLUTE) + stale PNG + stale AdobeRGB + stale jpeg_quality — delivery
-        # overrides (mode, fmt, color_space) must use session; sizing (quality) is
-        # preserved from per-file.
+        session_export = replace(
+            self.controller.state.config.export,
+            export_resolution_mode=ExportResolutionMode.ORIGINAL.value,
+            jpeg_quality=90,
+        )
+        self.controller.state.config = replace(self.controller.state.config, export=session_export)
+
         stale_export = replace(
             session_export,
             output_mode=ExportPresetOutputMode.SAME_AS_SOURCE,
@@ -1005,32 +1040,179 @@ class TestBatchExportFiltering(unittest.TestCase):
             output_subfolder="old_sub",
             export_fmt=ExportFormat.PNG,
             export_color_space=ColorSpace.ADOBE_RGB.value,
+            export_resolution_mode=ExportResolutionMode.TARGET_PX.value,
+            export_target_long_edge_px=2000,
+            paper_aspect_ratio="1:1",
+            export_print_size=10.0,
+            export_dpi=150,
             jpeg_quality=50,
+            filename_pattern="{{ original_name }}_stale",
         )
         stale_config = replace(self.controller.state.config, export=stale_export)
         self.mock_session_manager.repo.load_file_settings.return_value = stale_config
-        self.controller.request_batch_export(override_settings=False)
+        self.controller.request_batch_export()
         tasks = self._captured_tasks()
         self.assertEqual(len(tasks), 2)
         for t in tasks:
-            # output_mode is overridden from session (ABSOLUTE), NOT stale (SAME_AS_SOURCE)
-            self.assertEqual(t.params.export.output_mode, session_export.output_mode)
-            self.assertNotEqual(t.params.export.output_mode, ExportPresetOutputMode.SAME_AS_SOURCE)
-            self.assertEqual(t.params.export.output_subfolder, session_export.output_subfolder)
+            for field in (
+                "output_mode",
+                "output_subfolder",
+                "export_fmt",
+                "export_color_space",
+                "export_resolution_mode",
+                "export_target_long_edge_px",
+                "paper_aspect_ratio",
+                "export_print_size",
+                "export_dpi",
+                "jpeg_quality",
+                "filename_pattern",
+            ):
+                self.assertEqual(getattr(t.params.export, field), getattr(session_export, field), field)
+                self.assertEqual(getattr(t.export_settings, field), getattr(session_export, field), field)
             # export_path is validated by _ensure_valid_export_path (mocked to /tmp/out)
             self.assertEqual(t.params.export.export_path, "/tmp/out")
-            # Format/color-space from session config overrides per-file values so
-            # the delivery format matches what the UI shows, not a stale per-file setting.
-            # Without the fix, stale_export.export_fmt=PNG would leak into the export.
-            self.assertEqual(t.params.export.export_fmt, session_export.export_fmt)
-            self.assertNotEqual(t.params.export.export_fmt, ExportFormat.PNG)
-            self.assertEqual(t.params.export.export_color_space, session_export.export_color_space)
-            self.assertNotEqual(t.params.export.export_color_space, ColorSpace.ADOBE_RGB.value)
-            # Quality/sizing from per-file config is preserved
-            self.assertEqual(t.params.export.jpeg_quality, stale_export.jpeg_quality)
-            # Verify export_settings (the delivery config the worker actually reads)
-            self.assertEqual(t.export_settings.export_fmt, session_export.export_fmt)
-            self.assertEqual(t.export_settings.export_color_space, session_export.export_color_space)
+
+
+class TestLinearOutputExportCurrentFile(unittest.TestCase):
+    """Regression: exporting Linear Output for the *current* file (files=None) must
+    reuse its full asset dict, not a bare {path, name, hash} — otherwise
+    resolve_asset_rgbscan sees no green_path/blue_path and silently strips the RGB-scan
+    triplet, so only the primary (red) narrowband exposure gets exported."""
+
+    def setUp(self):
+        self.mock_session_manager = MagicMock(spec=DesktopSessionManager)
+        self.mock_session_manager.state = AppState()
+        self.mock_session_manager.repo = MagicMock()
+        self.mock_session_manager.repo.load_file_settings.return_value = None
+
+        self.mock_session_manager.state.uploaded_files = [
+            {
+                "name": "IMG_0001_R.cr2",
+                "path": "/tmp/IMG_0001_R.cr2",
+                "hash": "h1",
+                "green_path": "/tmp/IMG_0001_G.cr2",
+                "blue_path": "/tmp/IMG_0001_B.cr2",
+            }
+        ]
+        self.mock_session_manager.state.current_file_path = "/tmp/IMG_0001_R.cr2"
+        self.mock_session_manager.state.current_file_hash = "h1"
+
+        with (
+            patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,
+            patch("negpy.desktop.controller.PreviewManager") as mock_pm_class,
+        ):
+            mock_rw_class.return_value = MagicMock()
+            mock_pm_class.return_value = MagicMock(spec=PreviewManager)
+            mock_pm_class.return_value.load_linear_preview.return_value = (None, (0, 0), {})
+            self.controller = AppController(self.mock_session_manager)
+
+        self.controller.state.current_file_path = "/tmp/IMG_0001_R.cr2"
+        self.controller.state.current_file_hash = "h1"
+        self.controller._ensure_valid_export_path = MagicMock(return_value="/tmp/out")
+
+    def tearDown(self):
+        import gc
+
+        for thread in [
+            self.controller.render_thread,
+            self.controller.export_thread,
+            self.controller.thumb_thread,
+            self.controller.norm_thread,
+            self.controller.discovery_thread,
+            self.controller.preview_load_thread,
+            self.controller.scan_thread,
+        ]:
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait()
+        del self.controller
+        gc.collect()
+
+    def test_current_file_triplet_survives_linear_export(self):
+        with (
+            patch("negpy.services.export.linear_output.is_linear_output_supported", return_value=True),
+            patch("negpy.services.export.linear_output.export_linear_output") as mock_export,
+        ):
+            self.controller.request_linear_output_export()
+
+        mock_export.assert_called_once()
+        rgbscan = mock_export.call_args.kwargs["rgbscan"]
+        self.assertTrue(rgbscan.enabled)
+        self.assertEqual(rgbscan.green_path, "/tmp/IMG_0001_G.cr2")
+        self.assertEqual(rgbscan.blue_path, "/tmp/IMG_0001_B.cr2")
+
+
+class TestPresetExportCurrentFileTriplet(unittest.TestCase):
+    """Regression: request_preset_export() (the "Export Presets" button's current-file
+    scope) built a bare {path, name, hash} dict for every call, unconditionally — never
+    looking up uploaded_files at all. Same failure mode as the Linear Output current-file
+    bug: resolve_asset_rgbscan/resolve_asset_stitch see no green_path/blue_path and reset
+    the triplet, so a preset export of the current file silently used only the primary
+    (red) narrowband exposure instead of the merged RGB."""
+
+    def setUp(self):
+        self.mock_session_manager = MagicMock(spec=DesktopSessionManager)
+        self.mock_session_manager.state = AppState()
+        self.mock_session_manager.repo = MagicMock()
+        self.mock_session_manager.repo.load_file_settings.return_value = None
+
+        self.mock_session_manager.state.uploaded_files = [
+            {
+                "name": "IMG_0001_R.cr2",
+                "path": "/tmp/IMG_0001_R.cr2",
+                "hash": "h1",
+                "green_path": "/tmp/IMG_0001_G.cr2",
+                "blue_path": "/tmp/IMG_0001_B.cr2",
+            }
+        ]
+        self.mock_session_manager.state.current_file_path = "/tmp/IMG_0001_R.cr2"
+        self.mock_session_manager.state.current_file_hash = "h1"
+        self.mock_session_manager.state.export_presets = [
+            ExportPreset(name="JPEG", enabled=True, export_fmt=ExportFormat.JPEG),
+        ]
+
+        with (
+            patch("negpy.desktop.controller.RenderWorker") as mock_rw_class,
+            patch("negpy.desktop.controller.PreviewManager") as mock_pm_class,
+        ):
+            mock_rw_class.return_value = MagicMock()
+            mock_pm_class.return_value = MagicMock(spec=PreviewManager)
+            mock_pm_class.return_value.load_linear_preview.return_value = (None, (0, 0), {})
+            self.controller = AppController(self.mock_session_manager)
+
+        self.controller.state.current_file_path = "/tmp/IMG_0001_R.cr2"
+        self.controller.state.current_file_hash = "h1"
+        self.controller._validate_preset_paths = MagicMock(return_value=True)
+        self.controller._run_export_tasks = MagicMock()
+
+    def tearDown(self):
+        import gc
+
+        for thread in [
+            self.controller.render_thread,
+            self.controller.export_thread,
+            self.controller.thumb_thread,
+            self.controller.norm_thread,
+            self.controller.discovery_thread,
+            self.controller.preview_load_thread,
+            self.controller.scan_thread,
+        ]:
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait()
+        del self.controller
+        gc.collect()
+
+    def test_current_file_triplet_survives_preset_export(self):
+        self.controller.request_preset_export()
+
+        self.controller._run_export_tasks.assert_called_once()
+        tasks = self.controller._run_export_tasks.call_args.args[0]
+        self.assertEqual(len(tasks), 1)
+        rgbscan = tasks[0].params.rgbscan
+        self.assertTrue(rgbscan.enabled)
+        self.assertEqual(rgbscan.green_path, "/tmp/IMG_0001_G.cr2")
+        self.assertEqual(rgbscan.blue_path, "/tmp/IMG_0001_B.cr2")
 
 
 class TestPresetBatchExport(unittest.TestCase):
@@ -1307,7 +1489,7 @@ class TestSessionRestore(unittest.TestCase):
             self.controller.restore_session()
             self.assertEqual(self.controller._pending_scanned_file, b.name)
             self.controller.request_asset_discovery.assert_called_once_with(
-                [a.name, b.name], auto_open=True, restore_triplets={}, restore_stitches={}
+                [a.name, b.name], auto_open=True, restore_triplets={}, restore_stitches={}, restore_hdr={}
             )
 
     def test_restore_session_no_saved_files_is_noop(self):
@@ -1917,7 +2099,7 @@ class TestDisplayTransformParams(unittest.TestCase):
         state.selected_file_idx = 0
         state.current_file_path = "/tmp/frame.cr2"
         state.current_file_hash = "hash-1"
-        state.last_metrics = {"base_positive": np.zeros((4, 4, 3), dtype=np.float32)}
+        state.last_metrics = {"base_positive": np.zeros((4, 4, 3), dtype=np.float32), "source_hash": "hash-1"}
 
         emitted = []
         # Drop the real worker connection first: emitting would otherwise hand the

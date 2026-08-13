@@ -10,6 +10,10 @@ def test_backend_choices_include_plustek():
     assert ("plustek", "pyOpticfilm (Plustek)") in registry.backend_choices()
 
 
+def test_backend_choices_include_pieusb():
+    assert ("pieusb", "PIEUSB") in registry.backend_choices()
+
+
 def test_backend_choices_sane_only_off_windows():
     ids = {bid for bid, _ in registry.backend_choices()}
     if sys.platform == "win32":

@@ -8,7 +8,7 @@ import numpy as np
 from dataclasses import replace as dc_replace
 from functools import lru_cache
 from PIL import Image, ImageCms
-from typing import Callable, Tuple, Optional, Any, Dict, List
+from typing import Callable, Tuple, Optional, Any, Dict, List, Sequence
 from negpy.kernel.system.logging import get_logger
 from negpy.kernel.system.config import APP_CONFIG
 from negpy.domain.types import ImageBuffer
@@ -19,17 +19,19 @@ from negpy.domain.models import (
     ExportResolutionMode,
     ColorSpace,
 )
+from negpy.features.altprocess.models import AltProcess
 from negpy.features.process.models import ProcessMode
-from negpy.features.process.logic import linear_raw_token
+from negpy.features.process.logic import effective_linear_raw, linear_raw_token
 from negpy.features.process.sensor import apply_sensor_correction, effective_sensor_matrix, sensor_token
 from negpy.features.exposure.models import RenderIntent
 from negpy.features.flatfield.logic import apply_flatfield, flatfield_token
 from negpy.features.retouch.logic import (
     apply_hair_inpaint,
     apply_ir_attenuation,
-    apply_ir_reconstruction,
+    apply_score_repair,
     compute_dust_stats,
-    detect_luma_regions,
+    detect_luma_score,
+    film_scale,
     downsample_ir,
     hair_bake_token,
     ir_bake_token,
@@ -37,13 +39,19 @@ from negpy.features.retouch.logic import (
     ir_detect_cutoff,
     ir_detect_target,
     ir_ratio_and_gain,
-    route_ir_defects,
+    lines_to_score,
+    manual_bake_token,
+    repair_components,
+    route_wide_defects,
+    strokes_to_score,
 )
 from negpy.features.retouch import openice
 from negpy.features.retouch.models import IR_METHOD_OPENICE
 from negpy.features.rgbscan.logic import merge_rgb_triplet, rgbscan_token
 from negpy.features.rgbscan.models import RgbScanConfig, is_rgb_triplet
 from negpy.features.stitch.logic import stitch_composite
+from negpy.features.hdr.logic import merge_bracket
+from negpy.features.hdr.models import hdr_active, hdr_token
 from negpy.features.stitch.models import stitch_has_triplets, stitch_token
 from negpy.domain.interfaces import PipelineContext
 from negpy.services.rendering.engine import DarkroomEngine
@@ -59,7 +67,13 @@ from negpy.kernel.image.logic import (
     working_oetf_decode,
 )
 from negpy.infrastructure.loaders.factory import loader_factory
-from negpy.infrastructure.loaders.helpers import NonStandardFileWrapper, get_best_demosaic_algorithm, is_xtrans
+from negpy.infrastructure.loaders.helpers import (
+    NonStandardFileWrapper,
+    camera_wb_multipliers,
+    camera_xyz_matrix,
+    get_best_demosaic_algorithm,
+    is_xtrans,
+)
 from negpy.services.export.print import PrintService
 from negpy.infrastructure.display.color_spaces import ColorSpaceRegistry, WORKING_COLOR_SPACE
 from negpy.infrastructure.display.icc_lut import apply_icc_u16_rgb
@@ -140,6 +154,9 @@ class ImageProcessor:
         # One entry only (full-res buffers are large); treated read-only downstream.
         self._source_cache_key: Optional[tuple] = None
         self._source_cache_value: Optional[Tuple[np.ndarray, Optional[np.ndarray], str]] = None
+        # Decoder XYZ->camera matrix per source path, filled during decode. Small and
+        # append-only: one 3x3 per file the session has exported.
+        self._cam_xyz_by_path: Dict[str, Tuple[Optional[list], Optional[list]]] = {}
 
         # Flat-field + sensor-unmix corrected source: full-buffer passes that no
         # creative slider moves.
@@ -166,6 +183,13 @@ class ImageProcessor:
         # like _hair so creative-slider drags reuse the baked buffer.
         self._ir_recon_key: Optional[tuple] = None
         self._ir_recon_value: Optional[tuple] = None
+        # Repaired source for detected specks and for painted strokes. Same keying as
+        # _hair: a creative-slider drag reuses the buffer, a new stroke invalidates it
+        # through the manual token in source_hash.
+        self._luma_key: Optional[tuple] = None
+        self._luma_value: Optional[np.ndarray] = None
+        self._manual_key: Optional[tuple] = None
+        self._manual_value: Optional[tuple] = None
         # The OpenICE method's whole result, on its own slot: the two IR methods share no
         # state, so whichever loses can be deleted without unpicking the other.
         self._ice_key: Optional[tuple] = None
@@ -207,7 +231,7 @@ class ImageProcessor:
         target = ir_detect_target(max(img.shape[:2]), APP_CONFIG.preview_render_size)
         # Key on the source shape — downsample_ir is deterministic in it, so this
         # discriminates the same as the detection shape but resolves before the
-        # downsample runs. _ir_bake and _augment_retouch both call this per render;
+        # downsample runs. _ir_bake and _detect_luma both call this per render;
         # keying on the result made the second call repay a full-res erode to build
         # a key it then hit.
         key = (source_key, ir_buffer.shape, target)
@@ -249,8 +273,8 @@ class ImageProcessor:
             self._slow_step("removing IR dust")
             score_det = ir_defect_score(ratio_det, ir_detect_cutoff(ret.ir_threshold, ret.ir_attenuation))
             out = apply_ir_attenuation(img, gain_det) if ret.ir_attenuation else img
-            out = apply_ir_reconstruction(out, score_det)
-            routed = route_ir_defects(score_det)
+            out = apply_score_repair(out, score_det)
+            routed = route_wide_defects(score_det)
             self._ir_recon_key = key
             self._ir_recon_value = (out, routed)
         return out, (ratio_det < 0.97), False, routed
@@ -289,21 +313,17 @@ class ImageProcessor:
         self._hair_value = out
         return out
 
-    def _augment_retouch(
+    def _detect_luma(
         self,
         settings: WorkspaceConfig,
         img: np.ndarray,
         source_key: str,
-    ) -> Tuple[WorkspaceConfig, Optional[Dict[str, list]], List[np.ndarray]]:
-        """Source-space luma dust detection → synthesized heal strokes on a
-        render-local config (auto flags cleared — the engines only see strokes).
-        The caller's config is untouched, so synthesized strokes never reach
-        sidecars, presets or the DB. Also returns the detected strokes for the
-        display overlay (None when detection is off) and the detection-scale hair
-        masks for inpaint. IR defects never become strokes — _ir_bake repairs them."""
+    ) -> Tuple[Optional[np.ndarray], List[np.ndarray]]:
+        """Source-space luma dust detection → ``(detection-scale score, hair masks)``.
+        IR defects never come through here — _ir_bake repairs those."""
         ret = settings.retouch
         if self._is_flat(settings) or not ret.dust_remove:
-            return settings, None, []
+            return None, []
 
         key = (
             source_key,
@@ -312,44 +332,77 @@ class ImageProcessor:
             settings.process.process_mode,
         )
         if key == self._retouch_detect_key and self._retouch_detect_value is not None:
-            detected, hair_masks = self._retouch_detect_value
-        else:
-            stats_key = (source_key, int(ret.dust_size))
-            if stats_key == self._dust_stats_key and self._dust_stats_value is not None:
-                stats = self._dust_stats_value
-            else:
-                stats = compute_dust_stats(_detection_downsample(img), ret.dust_size)
-                self._dust_stats_key = stats_key
-                self._dust_stats_value = stats
-            # Ungated: the detector already confirmed the defect, and the
-            # bright-only gate leaves half-healed fringe rings (halos) around
-            # soft-edged specks (also, E6 dust is dark — gate would veto it).
-            synth_luma, hair_luma = detect_luma_regions(
-                _detection_downsample(img), ret.dust_threshold, ret.dust_size, gate=0.0, stats=stats
-            )
-            detected = {"luma": synth_luma}
-            hair_masks = [hair_luma] if hair_luma is not None else []
-            self._retouch_detect_key = key
-            self._retouch_detect_value = (detected, hair_masks)
+            return self._retouch_detect_value
 
-        synth = list(detected["luma"])
-        budget = max(0, 512 - len(ret.manual_heal_strokes) - len(ret.manual_dust_spots))
-        if len(synth) > budget:
-            logger.warning("Retouch: healing %d of %d detected defects (region cap)", budget, len(synth))
-            synth = sorted(synth, key=lambda s: -s[1])[:budget]
-        return (
-            dc_replace(
-                settings,
-                retouch=dc_replace(
-                    ret,
-                    dust_remove=False,
-                    ir_dust_remove=False,
-                    manual_heal_strokes=synth + list(ret.manual_heal_strokes),
-                ),
-            ),
-            detected,
-            hair_masks,
-        )
+        stats_key = (source_key, int(ret.dust_size))
+        if stats_key == self._dust_stats_key and self._dust_stats_value is not None:
+            stats = self._dust_stats_value
+        else:
+            stats = compute_dust_stats(_detection_downsample(img), ret.dust_size)
+            self._dust_stats_key = stats_key
+            self._dust_stats_value = stats
+        score, hair_luma = detect_luma_score(_detection_downsample(img), ret.dust_threshold, ret.dust_size, stats=stats)
+        value = (score, [hair_luma] if hair_luma is not None else [])
+        self._retouch_detect_key = key
+        self._retouch_detect_value = value
+        return value
+
+    def _luma_bake(self, img: np.ndarray, score: Optional[np.ndarray], cache_key: str) -> np.ndarray:
+        """Detected specks repaired into the linear source, ahead of the meters (mirrors
+        _ir_bake). Cached per (source+detection params, resolution)."""
+        if score is None:
+            return img
+        ckey = (cache_key, img.shape)
+        if ckey == self._luma_key and self._luma_value is not None:
+            return self._luma_value
+        self._slow_step("repairing dust")
+        out = np.asarray(repair_components(img, score))
+        self._luma_key = ckey
+        self._luma_value = out
+        return out
+
+    def _manual_bake(self, img: np.ndarray, settings: WorkspaceConfig, source_key: str) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """Painted strokes and traced scratch lines repaired into the linear source, by the
+        same fill the IR and luma paths use (mirrors _ir_bake; the GPU re-uploads source each
+        frame, so the bake reaches both engines parity-free). Both hold raw-frame coordinates,
+        so this runs before geometry and needs no mapping. Returns the buffer and the mask of
+        defects too wide for the fill, for the caller to inpaint."""
+        ret = settings.retouch
+        lines = getattr(ret, "scratch_lines", [])
+        if self._is_flat(settings) or not (ret.manual_heal_strokes or ret.manual_dust_spots or lines):
+            return img, None
+        key = (source_key, img.shape)
+        if key == self._manual_key and self._manual_value is not None:
+            return self._manual_value
+        # One pass for both hand-placed sources: whichever calls a pixel more damaged wins,
+        # and the fill sees every hole at once.
+        parts = [
+            s
+            for s in (
+                strokes_to_score(img, ret.manual_heal_strokes, ret.manual_dust_spots),
+                lines_to_score(img, lines, getattr(ret, "scratch_threshold", 0.5)),
+            )
+            if s is not None
+        ]
+        score = parts[0] if len(parts) == 1 else (np.minimum(*parts) if parts else None)
+        if score is None:
+            value: Tuple[np.ndarray, Optional[np.ndarray]] = (img, None)
+        else:
+            self._slow_step("repairing dust")
+            # floor=False: a scratch has lost emulsion and reads brighter than the film
+            # around it, so a painted repair must be free to darken as well as lighten.
+            # Film-footprint supports, not the buffer's own pixels: a painted score arrives at
+            # full buffer resolution, where the fill's fine rungs would be 3-9 px — grain scale,
+            # sitting entirely inside a defect that is 47 px wide at export. Their candidate is
+            # then the defect's own value and the repair only half-lands. The IR path never hits
+            # this because its score is measured coarse and carries the same factor here.
+            value = (
+                np.asarray(repair_components(img, score, floor=False, factor=film_scale(img.shape[:2]))),
+                route_wide_defects(score, budget=None),
+            )
+        self._manual_key = key
+        self._manual_value = value
+        return value
 
     def run_pipeline(
         self,
@@ -364,6 +417,8 @@ class ImageProcessor:
         crop_preview_full: bool = False,
         wants_uv_grid: bool = True,
         skip_flatfield: bool = False,
+        cam_xyz: Optional[list] = None,
+        camera_wb: Optional[list] = None,
     ) -> Tuple[Any, Dict[str, Any]]:
         """
         Executes rendering pipeline. Returns result (ndarray/GPUTexture) and metrics.
@@ -384,6 +439,7 @@ class ImageProcessor:
             sensor_token(settings.process),
             rgbscan_token(settings.rgbscan),
             stitch_token(settings.stitch),
+            hdr_token(settings.hdr),
         )
         if self._precorrect_key == precorrect_key and self._precorrect_value is not None:
             img = self._precorrect_value
@@ -411,9 +467,11 @@ class ImageProcessor:
             + flatfield_token(settings.flatfield)
             + rgbscan_token(settings.rgbscan)
             + stitch_token(settings.stitch)
-            + linear_raw_token(settings.process)
+            + hdr_token(settings.hdr)
+            + linear_raw_token(settings.process, settings.exposure.render_intent)
             + sensor_token(settings.process)
             + ir_bake_token(settings.retouch, ir_buffer is not None)
+            + manual_bake_token(settings.retouch)
         )
 
         # Bake the IR correction before detection so meters/stats see the corrected buffer.
@@ -421,9 +479,12 @@ class ImageProcessor:
         img, ir_corrected_mask, ir_degenerate, ir_routed = self._ir_bake(img, ir_buffer, settings, base_hash)
 
         orig_ret = settings.retouch
-        settings, detected_dust, hair_masks = self._augment_retouch(settings, img, base_hash)
-        if ir_routed is not None:
-            hair_masks = hair_masks + [ir_routed]  # never mutate the cached list
+        detected_dust, hair_masks = self._detect_luma(settings, img, base_hash)
+        img = self._luma_bake(img, detected_dust, base_hash + hair_bake_token(orig_ret))
+        img, manual_routed = self._manual_bake(img, settings, base_hash)
+        extra = [m for m in (ir_routed, manual_routed) if m is not None]
+        if extra:
+            hair_masks = hair_masks + extra  # never mutate the cached list
         # Inpaint long/twisted hairs into the source (both engines see it — the token
         # invalidates the base stage when detection params change; empty otherwise).
         hair_token = hair_bake_token(orig_ret) if hair_masks else ""
@@ -440,13 +501,15 @@ class ImageProcessor:
             process_mode=settings.process.process_mode,
             crop_preview_full=crop_preview_full,
             wants_uv_grid=wants_uv_grid,
+            cam_xyz=cam_xyz,
+            camera_wb=camera_wb,
         )
         if metrics:
             context.metrics.update(metrics)
-        # Display-overlay data: the detection set that would be healed, split by
-        # source. Absent when detection is off (so the overlay draws nothing).
+        # Display-overlay data: the detection-scale set that was repaired. Absent when
+        # detection is off (so the overlay draws nothing).
         if detected_dust is not None:
-            context.metrics["detected_dust_luma"] = detected_dust["luma"]
+            context.metrics["detected_dust_mask"] = detected_dust < 1.0
         # Overlay wash over the inpainted hairs (they emit no stroke capsules).
         if hair_masks:
             context.metrics["hair_inpaint_masks"] = hair_masks
@@ -472,6 +535,8 @@ class ImageProcessor:
                     readback_metrics=readback_metrics,
                     source_hash=source_hash,
                     analysis_source_hash=source_hash,
+                    cam_xyz=cam_xyz,
+                    camera_wb=camera_wb,
                 )
                 context.metrics.update(gpu_metrics)
                 return processed, context.metrics
@@ -499,6 +564,7 @@ class ImageProcessor:
             or t.vanadium_strength != 0.0
             or t.shadow_tint_strength != 0.0
             or t.highlight_tint_strength != 0.0
+            or settings.altproc.alt_process != AltProcess.NONE
         )
         is_bw = settings.process.process_mode == ProcessMode.BW and not is_toned
 
@@ -514,23 +580,31 @@ class ImageProcessor:
             return Image.fromarray(float_to_uint8(buffer))
         raise ValueError(f"Unsupported bit depth: {bit_depth}")
 
-    def _decode_sensor_rgb(self, file_path: str, linear_raw: bool, fast: bool = False) -> Tuple[np.ndarray, Dict[str, Any]]:
+    def _decode_sensor_rgb(
+        self, file_path: str, linear_raw: bool, fast: bool = False, wb_override: Optional[Sequence[float]] = None
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Decode one RAW to sensor-native (output_color=raw), linear uint16 RGB.
 
         `fast` allows a half-size decode (contact-sheet tiles); ignored where
         half_size would distort colors (see _use_half_size_decode).
+
+        `wb_override` decodes on someone else's white balance instead of this file's own.
+        Frames of one bracket must share a scale or the exposure ratios solved between them
+        absorb the difference, and `use_camera_wb` reads each *file's* as-shot multipliers —
+        which differ per frame on a camera left in auto white balance.
+
         Returns (rgb_uint16, loader_metadata).
         """
         ctx_mgr, metadata = loader_factory.get_loader(file_path, linear_raw=linear_raw)
         with ctx_mgr as raw:
             algo = get_best_demosaic_algorithm(raw)
-            user_wb = [1, 1, 1, 1] if linear_raw else None
+            user_wb = [1, 1, 1, 1] if linear_raw else (list(wb_override) if wb_override is not None else None)
             post_kw: Dict[str, Any] = {"half_size": True} if fast and _use_half_size_decode(raw, linear_raw) else {}
             rgb = raw.postprocess(
                 gamma=(1, 1),
                 no_auto_bright=True,
                 adjust_maximum_thr=0.0,  # fixed white level, never the frame's own max
-                use_camera_wb=not linear_raw,
+                use_camera_wb=not linear_raw and wb_override is None,
                 user_wb=user_wb,
                 output_bps=16,
                 output_color=rawpy.ColorSpace.raw,
@@ -539,6 +613,10 @@ class ImageProcessor:
                 **post_kw,
             )
             rgb = ensure_rgb(rgb)
+            # Sensor-native decode leaves the buffer in camera primaries; the transparency
+            # transfer needs the matrix to reach the working space (see capture_color).
+            metadata["cam_xyz"] = camera_xyz_matrix(raw)
+            metadata["camera_wb"] = camera_wb_multipliers(raw)
         return rgb, metadata
 
     def _load_source_f32(
@@ -563,9 +641,10 @@ class ImageProcessor:
         cache_key = (
             file_path,
             mtime,
-            params.process.linear_raw,
+            effective_linear_raw(params.process, params.exposure.render_intent),
             rgbscan_token(params.rgbscan),
             stitch_token(params.stitch),
+            hdr_token(params.hdr),
             flatfield_token(params.flatfield),
             sensor_token(params.process),
             fast_decode,
@@ -599,14 +678,20 @@ class ImageProcessor:
         Stitch registration is estimated on buffers produced here, so any decode
         the transforms are replayed against must come through here too.
         """
-        linear_raw = params.process.linear_raw
+        linear_raw = effective_linear_raw(params.process, params.exposure.render_intent)
         rgbcfg = params.rgbscan
-        is_triplet = is_rgb_triplet(rgbcfg)
+        # A bracket wins over a triplet: the two are refused together in the UI, and the
+        # export decode branches in this order — an asset that somehow carries both must
+        # not assemble differently on the two paths.
+        is_triplet = is_rgb_triplet(rgbcfg) and not hdr_active(params.hdr)
 
         rgb, metadata = self._decode_sensor_rgb(file_path, linear_raw, fast=fast_decode)
         # No embedded profile (scanner-raw linear, sensor-native RAW) → the buffer is
         # already in the working space, so "Same as Source" exports without converting.
         source_cs = str(metadata.get("color_space") or WORKING_COLOR_SPACE)
+        # Memoized rather than returned: the 3-tuple return is unpacked positionally in
+        # several callers, and only the export render needs this.
+        self._cam_xyz_by_path[file_path] = (metadata.get("cam_xyz"), metadata.get("camera_wb"))
         ir_full = metadata.get("ir")
 
         if is_triplet:
@@ -623,12 +708,37 @@ class ImageProcessor:
 
             rgb = merge_rgb_triplet(_decode, file_path, rgbcfg.green_path, rgbcfg.blue_path, align=rgbcfg.align)
 
-        f32_buffer = uint16_to_float32(rgb)
+        if hdr_active(params.hdr):
+            # Merged straight to float32: the recovered detail sits below the reference
+            # exposure's quantization step, so a uint16 round-trip would discard it.
+            # Before flat-field and the sensor unmix, both of which are applied below —
+            # the decode pins the white level (adjust_maximum_thr=0.0), so saturation is
+            # exactly 1.0 and the merge's exclusion threshold means what it says. A gain
+            # map applied first moves that point and skews the weights.
+            #
+            # Every frame decodes on the reference's white balance, never its own. The
+            # transfer path already decodes neutral (effective_linear_raw), so this is
+            # normally moot -- but it is pinned here rather than left to that, because a
+            # bracket whose frames sit on different white balances solves wrong ratios and
+            # says nothing about it.
+            bracket_wb = None if linear_raw else metadata.get("camera_wb")
+            f32_buffer = merge_bracket(
+                # fast_decode must ride along: a half-size primary against full-size
+                # siblings is a shape mismatch, not a slow merge.
+                lambda p: rgb if p == file_path else self._decode_sensor_rgb(p, linear_raw, fast=fast_decode, wb_override=bracket_wb)[0],
+                file_path,
+                params.hdr.hdr_paths,
+                params.hdr.hdr_ratios,
+                align=params.hdr.hdr_align,
+                anchor_path=params.hdr.hdr_anchor,
+            )
+        else:
+            f32_buffer = uint16_to_float32(rgb)
 
         if ir_full is not None and ir_full.shape[:2] != f32_buffer.shape[:2]:
             # Defensive: no current IR carrier half-sizes (libraw ignores half_size on
             # stacked LinearRaw, NonStandardFileWrapper is excluded from fast decode), but a
-            # mismatched plane must be rescaled or CPU retouch silently skips it. Routed
+            # mismatched plane must be rescaled or the IR bake silently skips it. Routed
             # through downsample_ir, not INTER_AREA, so a sub-pixel hair keeps its dip.
             ih, iw = f32_buffer.shape[:2]
             ir_full = downsample_ir(ir_full, max(ih, iw), dims=(iw, ih))
@@ -696,15 +806,20 @@ class ImageProcessor:
                 + flatfield_token(params.flatfield)
                 + rgbscan_token(params.rgbscan)
                 + stitch_token(params.stitch)
-                + linear_raw_token(params.process)
+                + hdr_token(params.hdr)
+                + linear_raw_token(params.process, params.exposure.render_intent)
                 + sensor_token(params.process)
                 + ir_bake_token(params.retouch, ir_full is not None)
+                + manual_bake_token(params.retouch)
             )
             f32_buffer, _, _, ir_routed = self._ir_bake(f32_buffer, ir_full, params, detect_key)
             orig_ret = params.retouch
-            params, _, hair_masks = self._augment_retouch(params, f32_buffer, detect_key)
-            if ir_routed is not None:
-                hair_masks = hair_masks + [ir_routed]
+            detected, hair_masks = self._detect_luma(params, f32_buffer, detect_key)
+            f32_buffer = self._luma_bake(f32_buffer, detected, detect_key + hair_bake_token(orig_ret))
+            f32_buffer, manual_routed = self._manual_bake(f32_buffer, params, detect_key)
+            extra = [m for m in (ir_routed, manual_routed) if m is not None]
+            if extra:
+                hair_masks = hair_masks + extra
             if hair_masks:
                 f32_buffer = self._hair_inpaint(f32_buffer, hair_masks, detect_key + hair_bake_token(orig_ret))
 
@@ -721,6 +836,8 @@ class ImageProcessor:
                     scale_factor=export_scale,
                     bounds_override=bounds_override,
                     readback_metrics=False,
+                    cam_xyz=self._cam_xyz_by_path.get(file_path, (None, None))[0],
+                    camera_wb=self._cam_xyz_by_path.get(file_path, (None, None))[1],
                 )
             else:
                 buffer, _ = self.run_pipeline(
@@ -732,6 +849,8 @@ class ImageProcessor:
                     prefer_gpu=False,
                     wants_uv_grid=False,
                     skip_flatfield=True,  # f32_buffer already flat-fielded by _load_source_f32
+                    cam_xyz=self._cam_xyz_by_path.get(file_path, (None, None))[0],
+                    camera_wb=self._cam_xyz_by_path.get(file_path, (None, None))[1],
                 )
                 buffer = self._apply_scaling_and_border_f32(buffer, params, params.export)
                 # Release full-res arrays pinned in the CPU stage cache.
@@ -947,15 +1066,20 @@ class ImageProcessor:
                 + flatfield_token(params.flatfield)
                 + rgbscan_token(params.rgbscan)
                 + stitch_token(params.stitch)
-                + linear_raw_token(params.process)
+                + hdr_token(params.hdr)
+                + linear_raw_token(params.process, params.exposure.render_intent)
                 + sensor_token(params.process)
                 + ir_bake_token(params.retouch, ir_full is not None)
+                + manual_bake_token(params.retouch)
             )
             f32_buffer, _, _, ir_routed = self._ir_bake(f32_buffer, ir_full, params, detect_key)
             orig_ret = params.retouch
-            params, _, hair_masks = self._augment_retouch(params, f32_buffer, detect_key)
-            if ir_routed is not None:
-                hair_masks = hair_masks + [ir_routed]
+            detected, hair_masks = self._detect_luma(params, f32_buffer, detect_key)
+            f32_buffer = self._luma_bake(f32_buffer, detected, detect_key + hair_bake_token(orig_ret))
+            f32_buffer, manual_routed = self._manual_bake(f32_buffer, params, detect_key)
+            extra = [m for m in (ir_routed, manual_routed) if m is not None]
+            if extra:
+                hair_masks = hair_masks + extra
             if hair_masks:
                 f32_buffer = self._hair_inpaint(f32_buffer, hair_masks, detect_key + hair_bake_token(orig_ret))
 
@@ -963,7 +1087,14 @@ class ImageProcessor:
                 prefer_gpu = False
 
             if prefer_gpu and self.engine_gpu:
-                buffer, _ = self.engine_gpu.process(f32_buffer, params, scale_factor=scale_factor, readback_metrics=False)
+                buffer, _ = self.engine_gpu.process(
+                    f32_buffer,
+                    params,
+                    scale_factor=scale_factor,
+                    readback_metrics=False,
+                    cam_xyz=self._cam_xyz_by_path.get(file_path, (None, None))[0],
+                    camera_wb=self._cam_xyz_by_path.get(file_path, (None, None))[1],
+                )
             else:
                 buffer, _ = self.run_pipeline(
                     f32_buffer,
@@ -973,6 +1104,8 @@ class ImageProcessor:
                     prefer_gpu=False,
                     wants_uv_grid=False,
                     skip_flatfield=True,  # f32_buffer already flat-fielded by _load_source_f32
+                    cam_xyz=self._cam_xyz_by_path.get(file_path, (None, None))[0],
+                    camera_wb=self._cam_xyz_by_path.get(file_path, (None, None))[1],
                 )
                 buffer = self._apply_scaling_and_border_f32(buffer, params, params.export)
                 self.engine_cpu.cache.clear()
@@ -1332,15 +1465,15 @@ class ImageProcessor:
             compression="tiff_lzw" if fmt == "TIFF" else None,
         )
 
-    def cleanup(self, release_source_cache: bool = True, collect: bool = True) -> None:
-        """Evacuates transient GPU resources."""
+    def cleanup(self, release_source_cache: bool = True, collect: bool = True, retain: Any = None) -> None:
+        """Evacuates transient GPU resources; ``retain`` survives the teardown."""
         if release_source_cache:
             self._source_cache_key = None
             self._source_cache_value = None
             self._precorrect_key = None
             self._precorrect_value = None
         if self.engine_gpu:
-            self.engine_gpu.cleanup(collect=collect)
+            self.engine_gpu.cleanup(collect=collect, retain=retain)
 
     def destroy_all(self) -> None:
         """Teardown GPU engine."""

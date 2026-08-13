@@ -1,3 +1,4 @@
+import os
 import io
 from types import SimpleNamespace
 from typing import Any, Optional, Tuple
@@ -88,10 +89,20 @@ class NonStandardFileWrapper:
     numpy -> rawpy-like interface.
     """
 
-    def __init__(self, data: np.ndarray, full_output_hw: Optional[Tuple[int, int]] = None) -> None:
+    def __init__(
+        self,
+        data: np.ndarray,
+        full_output_hw: Optional[Tuple[int, int]] = None,
+        wb_gains: Optional[Tuple[float, float, float]] = None,
+    ) -> None:
         self.data = data
         # If set, `sizes` reports this (h, w) for full image; else derived from `data` shape.
         self._full_output_hw: Optional[Tuple[int, int]] = full_output_hw
+        # As-shot (R, G, B) white balance gains, applied by postprocess() when the caller
+        # asks for camera WB. None means the source has no WB to offer (e.g. NegPy's own
+        # scanner DNGs, always neutral) — postprocess() then leaves the data untouched,
+        # same as it always has for those.
+        self.wb_gains: Optional[Tuple[float, float, float]] = wb_gains
 
     @property
     def sizes(self) -> Any:
@@ -114,6 +125,13 @@ class NonStandardFileWrapper:
         data = self.data
         if half_size:
             data = data[::2, ::2]
+
+        if kwargs.get("use_camera_wb") and self.wb_gains is not None:
+            r, g, b = self.wb_gains
+            data = data.astype(np.float32, copy=True)
+            data[..., 0] *= r
+            data[..., 2] *= b
+            data = np.clip(data, 0.0, 1.0)
 
         if gamma is None or tuple(gamma) != (1, 1):
             # LibRaw's default BT.709 display gamma — else linear thumbnails go near-black.
@@ -172,6 +190,86 @@ def is_xtrans(raw: Any) -> bool:
         return raw.raw_pattern.shape[0] == 6
     except (AttributeError, ValueError):
         return False
+
+
+def camera_xyz_matrix(raw: Any) -> Optional[list]:
+    """The decoder's XYZ->camera matrix as plain nested lists, or None if it carries none.
+
+    Serialized out of the rawpy object deliberately: the metadata dict outlives the `with`
+    block that owns the decoder, and the numpy view libraw hands back is backed by freed
+    memory once it closes.
+    """
+    try:
+        m = np.asarray(raw.rgb_xyz_matrix, dtype=np.float64)
+    except Exception:
+        return None
+    if m.ndim != 2 or m.shape[0] < 3 or m.shape[1] != 3 or not np.all(np.isfinite(m[:3])):
+        return None
+    # All-zero is libraw's "no colour data" sentinel, not a valid transform.
+    if float(np.abs(m[:3]).max()) < 1e-12:
+        return None
+    return [[float(v) for v in row] for row in m[:3]]
+
+
+def camera_wb_multipliers(raw: Any) -> Optional[list]:
+    """The as-shot white balance as [R, G, B] multipliers, or None if absent.
+
+    Needed only when a buffer is decoded WITHOUT white balance (Linear RAW): the camera
+    matrix is row-normalized, so it assumes a neutral camera signal, and an unbalanced
+    one renders with a heavy cast. Folding these back in reconstructs the balanced
+    signal the matrix expects. Serialized out of the rawpy object for the same
+    lifetime reason as camera_xyz_matrix.
+    """
+    try:
+        wb = [float(v) for v in raw.camera_whitebalance[:3]]
+    except Exception:
+        return None
+    if len(wb) != 3 or not all(np.isfinite(wb)) or min(wb) <= 0.0:
+        return None
+    return wb
+
+
+#: Nikon's High Efficiency (HE / HE*) raw on the Z 8 / Z 9 is intoPIX TicoRAW carrying a
+#: plain-text vendor marker at the head of the strip. The TIFF tag still reads 34713
+#: ("Nikon NEF Compressed"), the same value a lossless NEF uses, so tags cannot tell them
+#: apart -- only the payload can.
+_TICORAW_MARKER = b"INTOPIX"
+_NEF_COMPRESSED = 34713
+
+
+def unsupported_raw_reason(file_path: str) -> Optional[str]:
+    """Why libraw cannot decode this raw, in words a photographer can act on.
+
+    None when nothing recognised is wrong -- the caller then reports libraw's own error,
+    which is right for a genuinely corrupt or unknown file. This exists because the useful
+    cases are indistinguishable from corruption by their tags: a High Efficiency NEF parses
+    perfectly, reports full sensor dimensions, and only fails when the payload is unpacked.
+    """
+    if os.path.splitext(file_path)[1].lower() != ".nef":
+        return None
+    try:
+        import tifffile
+
+        with tifffile.TiffFile(file_path) as tif:
+            for sub in tif.pages[0].pages or []:
+                tags = getattr(sub, "tags", None)
+                compression = tags.get("Compression") if tags else None
+                if compression is None or int(compression.value) != _NEF_COMPRESSED:
+                    continue
+                offsets = tags.get("StripOffsets")
+                if offsets is None:
+                    continue
+                offset = offsets.value[0] if isinstance(offsets.value, (tuple, list)) else int(offsets.value)
+                with open(file_path, "rb") as f:
+                    f.seek(int(offset))
+                    if _TICORAW_MARKER in f.read(64):
+                        return (
+                            "Nikon High Efficiency (HE) raw — NegPy cannot decode this format. "
+                            "Re-shoot as Lossless Compressed, or convert to DNG."
+                        )
+    except Exception:
+        return None
+    return None
 
 
 def get_supported_raw_wildcards() -> str:

@@ -23,7 +23,7 @@ The right-hand tabs are arranged in the order you actually work, which mirrors t
 | **Setup** | cogs | Presets · Calibration · Process · Roll Analysis | Film type, capture-side colour corrections, negative→positive normalization, roll-wide baselines |
 | **Geometry** | crop | Geometry · Flat Field | Crop, straighten, lens/falloff correction |
 | **Exposure** | sun | Filtration · Tone · Dodge & Burn | White balance, print density/contrast/curve/saturation, local burns |
-| **Colour** | palette | Lab · Toning | Chroma, sharpening, effects, split/chemical toning |
+| **Colour** | palette | Lab · Alternative Processes · Toning | Chroma, sharpening, effects, lith and cyanotype printing, split/chemical toning |
 | **Finish** | brush | Retouch · Finishing | Dust removal, vignette, border, carrier |
 | **Favourites** | star | Your chosen sliders | Quick access to the controls you use most |
 | **History** | clock | Work prints · Edit history | Keep named versions, step back through every change |
@@ -41,7 +41,7 @@ Both side panels can be narrowed to give the canvas more room. As the controls p
 
 ## 2. Film strip (left panel)
 
-The header shows the NegPy logo and version (and an update link when a new release is out); the chevron at its top-right folds the branding away to give the frames more room, and NegPy remembers that too. Below it: the toolbar, the search box, and then two collapsible sections — **Library** (the folders your scans live in) and **Film Strip** (the frames you have open). Click either heading to fold it away; the one still open takes the whole panel, and a folded one keeps just its heading. NegPy remembers which were open.
+The header shows the NegPy logo and version. When a newer release is out, a green **⬇ Update Available** line appears under it — click it to read what changed and let NegPy install it ([§15](#15-updating-negpy)). The chevron at the header's top-right folds the branding away to give the frames more room, and NegPy remembers that too. Below it: the toolbar, the search box, and then two collapsible sections — **Library** (the folders your scans live in) and **Film Strip** (the frames you have open). Click either heading to fold it away; the one still open takes the whole panel, and a folded one keeps just its heading. NegPy remembers which were open.
 
 ### Your library
 
@@ -72,13 +72,15 @@ NegPy reads the tree straight from disk and never creates, renames, moves or del
 
 ### Importing & managing files
 
+**A note on Nikon High Efficiency raw.** The Z 8 and Z 9 can record NEFs in **High Efficiency (HE)** or **HE\***, which use a licensed codec NegPy cannot decode. Such a file is still called `.NEF` and still carries the same TIFF compression tag as an ordinary lossless NEF, so nothing about it looks unusual until it fails to open — NegPy names the reason rather than reporting a generic unsupported-file error. Re-shoot in **Lossless Compressed** NEF, or convert with Adobe DNG Converter. Lossless NEFs from the same cameras open normally.
+
 Toolbar buttons, left to right:
 
 *   **Add files** / **Add folder**: load individual images or every image in a folder. Pick a folder that only holds *other* folders and NegPy reveals it in the Library section instead of reporting that it found nothing. Dropping a folder on the window does the same.
 *   **Clear all**: unload everything (or, when several frames are selected, unload just those).
-*   **Hot Folder**: watches the current folder and auto-loads new files as they appear, handy when a scanner drops files into a directory.
-*   **RGB Scan**: treats the folder as red/green/blue exposure triplets and assembles each frame from three shots (for narrowband trichrome scanning). Right-click a frame → **Edit RGB Triplet…** to assign the three files by hand.
-*   **Half Frame**: splits each scan into two frames (for half-frame cameras), edited and metered separately. When enabled, a rectangle editor opens on the current scan: drag the green box to crop (everything outside is discarded), drag the orange line to set the split, and use the **Cut thickness** slider to discard a band centered on the split (the physical black separator between the two exposures). The setting is saved and applied to every half-frame split from then on, regardless of how the scans were acquired (SANE scanner, camera copy-stand, or folder import). The **Adjust Half Frame** toolbutton (next to Half Frame) re-opens the editor on the current scan to fine-tune. Auto-detection of the gutter still seeds the initial split position.
+*   **Hot Folder**: watches the current folder and auto-loads new files as they appear, handy when a scanner or tethering app drops files into a directory. While it is on, the "Working…" import popup stays hidden so each new frame does not raise a window; the status line over the canvas still reports the import.
+*   **RGB Scan**: treats the folder as red/green/blue exposure triplets and assembles each frame from three shots (for narrowband trichrome scanning). Right-click a frame → **Edit RGB Triplet…** to assign the three files by hand. An assembled frame carries the three-dot badge described under [Triage](#triage-culling-the-roll).
+*   **Half Frame**: splits each scan into two frames (for half-frame cameras), edited and metered separately, each carrying a badge that shows which half it is. When enabled, a rectangle editor opens on the current scan: drag the green box to crop (everything outside is discarded), drag the orange line to set the split, and use the **Cut thickness** slider to discard a band centered on the split (the physical black separator between the two exposures). The setting is saved and applied to every half-frame split from then on, regardless of how the scans were acquired (SANE scanner, camera copy-stand, or folder import). The **Adjust Half Frame** toolbutton (next to Half Frame) re-opens the editor on the current scan to fine-tune. Auto-detection of the gutter still seeds the initial split position.
 *   **Apply (clone)**: copy the current frame's settings to selected frames or the whole roll. You choose which aspects in a dialog (crop and rotation are always per-image).
 *   **Sheet filter** (funnel): show *All frames*, *Keepers only*, or *Hide rejected*.
 *   **Sort**: by Name or Date, ascending or descending.
@@ -112,9 +114,47 @@ Right-clicking **empty space** in the film strip offers **Add files**, **Add fol
 
 #### Stitching a frame from several shots
 
-If one negative was captured in overlapping pieces (a copy stand at higher magnification than the frame), select the pieces and right-click → **Stitch selected frames**. NegPy finds the overlap, matches brightness across the seam and replaces the parts with a single wide composite named *a+b (Stitch)*. The parts' own edits stay on file, so right-click → **Unstitch** puts them back untouched. The registration is saved with the session and replayed on the next launch, so re-opening a composite costs nothing.
+If one negative was captured in overlapping pieces (a copy stand at higher magnification than the frame), select the pieces and right-click → **Stitch selected frames**. NegPy finds the overlap, matches brightness across the seam and replaces the parts with a single wide composite named *a+b (Stitch)*, badged on the sheet so you can tell it from a plain frame. The parts' own edits stay on file, so right-click → **Unstitch** puts them back untouched. The registration is saved with the session and replayed on the next launch, so re-opening a composite costs nothing.
 
 This works on RGB-scan frames too: turn on **RGB Scan** first so each piece is already assembled from its own R/G/B triplet, then stitch the assembled frames. Each part keeps its own three exposures — nothing is shared between parts.
+
+#### Merging bracketed exposures (HDR)
+
+A slide's density runs deeper than one camera exposure can record. Expose for the highlights and the darkest parts of the frame sit in sensor noise; expose for those and the bright parts blow. Bracket the capture instead — several shots of the same slide a stop apart — then select them and right-click → **Merge exposures (HDR)**. They collapse into one frame named *a +4 (HDR)* that carries the whole range, badged on the sheet so a merge is never mistaken for a single capture. Right-click → **Unmerge exposures** puts the originals back; their own edits are untouched.
+
+Nothing needs to be set up beforehand. NegPy measures the exposures from the images themselves rather than trusting shutter tags (several supported scanner formats have none), works out how many stops apart they are, and registers them to each other in case the camera shifted between frames. The result is saved with the session, so re-opening a merged frame costs nothing.
+
+**How it lands.** Two separate choices, and it helps to keep them apart. The merge is *computed* in the units of the longest exposure that doesn't clip — the best reference radiometrically, since every other frame converts into it and nothing can exceed white. Which exposure the picture then *opens at* is a different question, and not one the software can answer: a slide's own brightest point is denser than clear film, so the longest unclipped capture is brighter than the shot you metered, and rendering there pushes the highlights into the top of the transfer curve where it has least gradient left. That looks like lost highlight detail, because it is.
+
+So nominate the frame yourself. Right-click a merged frame → **Render exposure** and pick the shot that looks the way you intended; the merge opens exactly there, and the other frames contribute only range and cleanliness. The list shows each frame in stops from the reference, the reference itself marked *(as captured)*.
+
+Only the reference and any **shorter** exposures are listed. The merge can never open brighter than the reference — that is the frame defining white, and going past it would only blow the highlights — so a longer frame would render identically and is not offered. The longer frames are in the bracket to buy shadows, not to be rendered at. If a bracket has nothing below its reference there is no choice to make, and the menu does not appear.
+
+Left on **Bracket middle (auto)** it falls back to the middle exposure of the bracket, which is a reasonable guess only when you bracketed evenly either side of the metered shot — bracket *upward* from it and every frame sits at or above the reference, so the middle lands on the reference and the setting does nothing.
+
+**Include the shot that already looks right**, and at least one darker than it. It is tempting to bracket only upward, since frames *longer* than the reference are what buy the shadows. Don't: the menu can only offer frames you actually shot, so the darkest render you can ask for is the darkest exposure in the bracket. Across eleven real brackets the reference landed **1 to 3 stops above the metered frame** and was never the metered frame itself — so *(as captured)* is not the exposure you took, and the one you want is usually a stop or two below it.
+
+Measured on a five-frame bracket a stop apart, signal-to-noise in the deepest shadows went from 3.0 on the frame you would otherwise have used to **12.3** merged — about two stops — with the midtones unchanged. The gain is entirely where a transparency is hardest to scan.
+
+**A merge opens with its shadows already lifted**, by an amount derived from the range the bracket recovered — you will see **Shadows Density** sitting off zero. That is deliberate. If your metered frame did not clip, the merge did not add *range*, it added *precision*: the tones were all recorded, just with very few levels on top of noise (a slide's density-2.9 region gets about 72 of 65535). Precision is invisible at the same tone — cleaner noise looks like the same picture — so a merge left neutral renders indistinguishable from the frame it was metered on, which is not what you merged for. The lift is measured, not a look: it goes only as far as the recovered precision affords, so the opened shadows are still quieter than the single frame's were. Drag **Shadows Density** to zero for the render that is faithful to the metered frame; that choice is saved like any other edit. **Reset Settings** brings the seeded starting point back, along with the merge itself and the inherited film process.
+
+Bracket **both ways**, for two different reasons.
+
+**Upward, for range.** Longer exposures are what reach the deep shadows, and they set the reference. Metered, +1, +2, and +3 if the shadows are deep.
+
+**Downward, for choice.** Shorter exposures add almost nothing to the *pixels* — dropping every one of them from eleven real brackets changed more than 1% of the picture on 0.00–0.04% of its area, once 0.6%, because the reference already holds the highlights by construction. That is not their job. Their job is to appear in the **Render exposure** menu, and a merge is only as adjustable as the frames you gave it. On the brackets here that stopped at the metered shot the menu offered two entries and the preferred render was the bottom one — no room left to go darker. The ones that went two stops below it offered four and five, down to −3 and −4 EV.
+
+Metered −2 through +3 costs six frames and leaves the decision to you at the end. If you must economise, economise upward, not downward: an extra long frame buys shadow noise you may not notice, an extra short frame buys a choice you cannot make later.
+
+Shorter frames do carry one thing outright — a **blown specular**, the sliver of water highlight or sun disc above the reference's white. On three of the eleven that was a mean 0.03 difference across the near-white 0.1% of the frame.
+
+The merged frame inherits the **film process** of the exposures it came from, so a bracket of slides opens in E-6 rather than reverting to whatever mode you last set by hand. Stitched composites do the same.
+
+It is **named after the first frame in filename order**, with an `-HDR` suffix — a bracket of `_DSC1715`…`_DSC1719` exports as `_DSC1715-HDR.jpg`. Not the reference frame, whose identity depends on picture content; and the suffix means a merge never writes over the export of the single frame it is named after.
+
+**Merging is for transparencies.** The action appears on E-6 frames only. A colour negative holds about 5-6 stops between its base and its densest highlight and an ordinary black-and-white negative nearer 4 — both comfortably inside one capture, so a bracket buys nothing; a transparency runs to 10-12, which is what the merge exists for. On black-and-white the entry is shown but disabled, because reversal-processed monochrome (Scala, dr5, Fomapan R) really is a transparency and does have the range — it is simply not wired up yet.
+
+Merging is also refused on frames that are already merged, stitched, or RGB-scan triplets: each of those is its own way of building one frame from several files, and combining them is not supported.
 
 Narrow the panel and the toolbar buttons that no longer fit move into a **»** menu at its right edge, so the panel can be squeezed down to give the image more room without losing any tool.
 
@@ -126,6 +166,28 @@ Right-click a thumbnail (or use keyboard shortcuts) to mark frames while you rev
 *   **Reject**: a cross badge dims the frame. Rejected frames stay on the sheet but are skipped by batch exports and sidecar writes. **The file on disk is never touched.**
 
 Marks apply to a multi-selection and persist across sessions. A badge in the top-right corner instead flags a frame that failed to decode.
+
+#### Reading the badges
+
+Each corner of a thumbnail means one thing, so the marks never compete:
+
+| Corner | Badge | Means |
+|---|---|---|
+| Bottom-right | check | keeper |
+| Bottom-right | cross, frame heavily dimmed | rejected |
+| Top-right | exclamation | the file failed to decode — click to retry |
+| Bottom-left | *see below* | the frame was built from more than one file |
+
+The bottom-left badge is grey, not red, because it reports what the frame *is* rather than something you marked. Its glyph says which kind:
+
+| Glyph | Frame |
+|---|---|
+| Two overlapping panes | a stitched composite ([§Stitching](#stitching-a-frame-from-several-shots)) |
+| Three stacked bars | a merged bracket ([§Merging](#merging-bracketed-exposures-hdr)) |
+| Three red/green/blue dots | an RGB-scan triplet |
+| A split rectangle, one side filled | one half of a half-frame scan — the filled side is which half |
+
+Hover any thumbnail and the tooltip says the same thing in words, with the frame count: *HDR merge of 5 exposures*, *Stitched composite of 3 frames*.
 
 The right-click menu also offers **Copy/Paste Settings** (with or without normalization bounds), **Reset Settings**, **Apply settings…**, and per-frame export.
 
@@ -218,9 +280,10 @@ Everything here corrects the *capture*, not the look: three different things sit
 
 This block greys out unless **Linear RAW** is on, since profiles are calibrated against neutral white balance and the as-shot gains would misapply the matrix. Your selection is remembered either way. It is also skipped for RGB-triplet assets, which never had the leak. Because it changes what the analysis reads, **re-run Batch Analysis** after changing it.
 
-**Crosstalk** (hidden in B&W), a channel unmix applied to the raw negative densities before inversion. The film's dyes each absorb outside their own band, but they are not the only cause: your light's spectrum and your sensor's colour filters mix the channels too, and in the density domain all three arrive as the same kind of error. So treat the matrix as *your whole scanning setup*, not just the film — a profile that works beautifully on one rig may be wrong on another with the same stock.
+**Crosstalk** (hidden in B&W), a channel unmix applied to the raw densities before inversion. The dropdown only lists matrices for the film you are processing — a C-41 matrix does not describe E-6's dye set — and a mismatched stored profile resolves to no correction rather than the wrong one. The film's dyes each absorb outside their own band, but they are not the only cause: your light's spectrum and your sensor's colour filters mix the channels too, and in the density domain all three arrive as the same kind of error. So treat the matrix as *your whole scanning setup*, not just the film — a profile that works beautifully on one rig may be wrong on another with the same stock.
 
-*   **Matrix**: the profile to apply, grouped in the dropdown by where its numbers came from (measured, tuned on a rig, or from spec sheets). *Generic C41* is the built-in; drop custom `.toml` matrices in `<Documents>/NegPy/crosstalk/` (see [CROSSTALK.md](CROSSTALK.md)). The slider button opens a matrix editor, where a **Type** control records that provenance for your own profiles.
+*   **Matrix**: the profile to apply, grouped in the dropdown by where its numbers came from (measured, tuned on a rig, or from spec sheets). *Generic C41* is the built-in; drop custom `.toml` matrices in `<Documents>/NegPy/crosstalk/` (see [CROSSTALK.md](CROSSTALK.md)). The slider button opens a matrix editor, where a **Type** control records that provenance and a **Process** control says which film the numbers describe — that is what decides where the profile appears and whether it applies, so a matrix you build for slides needs it set to E-6. Anything created with **+** is already set to the process you are working in.
+    When the current film process has no matrices at all, the dropdown and **Strength** are disabled and a hint says so, but the editor button stays live — it is the way to build the first one.
 *   **Strength** (0.0 to 1.0): how much of the unmix to apply, for richer and cleaner colour separation. Because it changes what the analysis reads, **re-run Batch Analysis** after changing it.
 
 > **The bundled film matrices are derived from published spec sheets, not measured** — which is why they are all marked *(approx)*. They describe the film's **dyes alone**, so they are only the whole story where your capture reads each dye cleanly: a **true RGB scan** (a Coolscan-style mono sensor lit one band at a time) or a **calibrated trichrome rig** (see *Trichrome Calibration* above). With a broadband light and a Bayer sensor, the capture adds mixing of its own that a dyes-only matrix does not describe — it may still help, but treat the number as a starting point rather than a correction for your setup.
@@ -235,6 +298,12 @@ This block greys out unless **Linear RAW** is on, since profiles are calibrated 
 ### 4.3 Process: negative → positive
 
 The foundation of every edit: film type, how the scan is decoded, and how the negative is normalized into a positive.
+
+*   **Multi-core CPU Rendering** (canvas toolbar → **»** menu, beside **GPU Acceleration**): spreads the CPU rendering kernels across your cores. It takes effect immediately — nothing recompiles and there is no restart.
+
+    Be realistic about the gain. The kernels themselves run **5-8x** faster, but a merge is dominated by decoding the RAW files, which this does not touch: on a 6-frame 24 MP bracket, decoding is about 6.6 s of a roughly 9 s merge, so the whole operation comes down by **around 10%**. Ordinary editing changes less again, because the GPU already carries the pipeline. The gain is largest wherever the CPU is doing the work — merges, exports, and any machine without a usable GPU.
+
+    On Windows and Linux this is **on**. On macOS it is **off**, pending more evidence: the underlying threading layer terminates the process outright if two threads enter it at once, and while NegPy serialises every such call behind a lock, that has been proven on one Mac rather than on the range of them. If you turn it on and the app ever closes without warning, NegPy notices on the next launch and offers to turn it back off — that is the failure to expect, and it is recoverable. Setting `cpu_parallel` under `[performance]` in `override.toml` still wins over the menu, for a machine that cannot start.
 
 *   **Scanning setup** (bulb button): a two-question wizard, *how do you scan?* then *what light source?*, that sets Linear RAW and Narrowband for you. It runs once after the first-launch tour; the button reopens it whenever your rig changes.
 *   **Linear RAW**: (default off) decodes with neutral multipliers for completely raw data. When toggled off decodes RAW with the camera's as-shot white balance. Toggling reloads the file. Let the **Scanning setup** wizard pick it, or try both and pick which yields better results for your setup.
@@ -261,11 +330,28 @@ Applying it sets the defaults for newly loaded files, updates the open frame, an
 
 *   **Luma Range Clip** (-100 to 100): how aggressively the tonal range (black/white-point span) is set. Neutral already applies a small robust clip. Positive tightens it, which is good for dense or fogged negatives where a few stray pixels would push the bounds to extremes. Negative pushes the bounds *outward* for lifted blacks / unclipped highlights.
 *   **Colour Clip** (-100 to 100): the per-channel colour-balance clip (orange-mask removal), independent of the tonal range. Positive tightens channel balance; negative samples nearer the extremes.
-*   **Global / R / G / B** selector → **White Point** / **Black Point** (-0.25 to 0.25): manual offsets on top of the auto-detected bounds. Positive white point brightens; positive black point lifts blacks. In R/G/B mode these become per-layer trims: per-dye-layer film-base (Dmin) and Dmax corrections, i.e. scanner-style per-channel levels. Hidden in B&W.
+*   **Global / R / G / B** selector → **White Point** / **Black Point** (-0.25 to 0.25): manual offsets on top of the auto-detected bounds. Positive white point brightens; positive black point lifts blacks. In R/G/B mode these become per-layer trims: per-dye-layer film-base (Dmin) and Dmax corrections, i.e. scanner-style per-channel levels. The selector is hidden in B&W, where per-layer trims are meaningless, and on E-6 with Normalize off, where the sliders it scopes are hidden with the rest of the normalization tuning.
 
 **Crosstalk**, **Hue Trim** and the sensor unmix all live in **Calibration** (§4.2) — they correct the capture rather than the negative-to-positive conversion.
 
-**Normalize** (E-6 only): auto-stretches a slide's histogram to fill the dynamic range. Useful for faded/expired slides.
+> **No E-6 matrix ships with NegPy.** On slides the Matrix dropdown therefore starts empty, and it and Strength are disabled until a matrix exists — but the editor button stays live, so you can build your own (press **+**, and it is created for the process you are in). A `.toml` marked `process = "E-6"` dropped into your crosstalk folder works too. Be aware it means something different there: on a negative the dyes' unwanted absorptions are an error to remove before inversion, so unmixing moves the render *toward* the scene, but a transparency **is** the finished image — what you see on a lightbox already includes those absorptions — so unmixing moves it *away* from the slide's own look. On E-6 treat it as a colour-separation control, not a fidelity correction. **Hue Trim** is unaffected by any of this: it corrects the light source, so it applies to slides exactly as it does to negatives.
+
+**Normalize** (E-6 only): the switch between two ways of rendering a slide.
+
+*   **On**: auto-stretches the histogram to fill the dynamic range, metered per frame, and prints it through the paper model like a negative. This is a **rescue tool for faded or expired slides** — that is what it was added for. Where the dyes have lost their range, metering it back per frame is exactly right, and because the stretch is metered, two exposures of the same slide converge on a similar render.
+
+    On a slide that was exposed as intended, expect it to look washed out and desaturated, and that is not a bug in the sense of a miscalculation: a slide's density runs all the way to Dmax but only its top ~1.5 decades carry picture, so a stretch measured across the whole range squeezes the picture into the top of the print curve, where the shoulder compresses tone and colour together. Reach for it when the slide needs rescuing, not as a starting point.
+*   **Off** (default): renders the slide **as captured**. The camera's own colour matrix is applied and the tonal window is fixed to the decoder's white level rather than measured from the frame, so a slide opens looking the way it does in Photoshop, Preview, Affinity or Darktable — and a bracketed set stays a bracket, with each exposure rendering at its own brightness. This is the mode to use when you exposed the slide the way you wanted it and only need to adjust from there.
+
+    With Normalize off the paper simulation has nothing to act on, so the print-specific controls are hidden (paper profile, Paper White/Black, Auto Density, Auto Grade, split grade, Dye Separation) along with the normalization tuning above, which only shapes a *measured* stretch. What stays is a plain transfer curve, neutral at its defaults: **Print Density** (exposure), **ISO-R Grade** (contrast), **Toe** / **Shoulder** and their **Width** sliders (shadow and highlight roll-off), **Shadows Density** / **Highlights Density** (§4.4), the per-layer R/G/B trims, and white balance. Lab, Toning and Finish work as usual.
+
+    Coming from Lightroom's basic panel, the map is: **Exposure** → Print Density (inverted — lower is brighter), **Contrast** → ISO-R Grade (inverted — 180 is softest), **Shadows** → Shadows Density, **Highlights** → Highlights Density, with Toe and Shoulder shaping how each end rolls off. Note the Density sliders take the darkroom sign: *positive adds density*, so negative Shadows Density is what opens the shadows. **Whites** and **Blacks** have no equivalent here — the tonal window is fixed by design, which is what makes the render faithful to the capture.
+
+    A source with no camera matrix (a scanner TIFF, a JPEG) is already in the working space and passes straight through.
+
+    **Linear RAW** and **Narrowband** are hidden here, because neither applies to an as-captured render and both are made inert rather than merely hidden (they are sticky settings, so leaving them live but invisible would be a trap). Linear RAW decodes without the as-shot white balance, which the camera matrix assumes is present — the multipliers are folded back in, so the render is identical either way. Narrowband's bundled input profile is suppressed, since the camera matrix has already reached the working space and a second input characterisation would compete with it. An explicit Input ICC in Export still applies.
+
+    Narrowband capture is not recommended for this mode in any case: reproducing a slide's appearance is a colorimetric problem, and narrowband illumination samples the spectrum at three isolated wavelengths, so the inter-band overlap the eye integrates is never measured (the same reason narrowband scans render oversaturated and hue-rotated). Its real payoffs — defeating the orange mask, clean dye separation ahead of a high-gain inversion — belong to negatives, and a transparency has neither. Both toggles keep working normally for C-41, B&W and E-6 with Normalize on.
 
 <!-- panel:roll -->
 ### 4.4 Roll Analysis: a consistent look across the roll
@@ -336,7 +422,9 @@ Colour timing, like the dichroic filters on an enlarger head. A **Global / Shado
 *   **Reset** (undo-arrow icon): return the selected region's temperature and CMY to neutral.
 *   **Temperature**: a warm↔cool lever driving the region's magenta/yellow pair (cyan stays put, as in a real darkroom).
 *   **Cyan / Magenta / Yellow** (-1 to 1): the three filtration axes, Cyan↔Red, Magenta↔Green and Yellow↔Blue.
-*   **Cast Removal** (0.0 to 1.0): neutralizes the residual colour cast a negative leaves in the print, balancing each layer so greys stay neutral from deep shadows through highlights (C-41). Applied strength scales with how many clean near-neutrals the frame has. Default ~0.5; 0 turns it off.
+*   **Cast Removal** (0.0 to 1.0, **C-41 only**): neutralizes the residual colour cast a negative leaves in the print, balancing each layer so greys stay neutral from deep shadows through highlights. Applied strength scales with how many clean near-neutrals the frame has. Default ~0.5; 0 turns it off.
+
+    Hidden in E-6 and B&W, because the render ignores it there. What it defeats is the **orange mask** — a cast the manufacturer built into the film, not part of the picture. A slide has no mask and its cast *is* the photograph, so solving for a neutral axis would strip out the light you shot in; B&W has one emulsion and no channels to balance. For a slide's colour use **Temperature** and the CMY sliders above, or **Hue Trim** (§4.2) if an unusual scanning light has rotated the hues.
 *   **Ring-around** (target icon, or `Shift+F`): prints the frame as a 5×5 mosaic stepping 2cc at a time out to ±4cc on the magenta and yellow axes, so the direction of a colour cast is visible instead of guessed. Each patch is a real render of the part of the frame it covers; click one to keep its filtration. The ladder is absolute and centred on neutral, so a ring printed off one frame compares to the next. `Escape` or a second press clears it, and any edit drops it. See **Rotating a proof** below.
 
 <!-- panel:tone -->
@@ -359,13 +447,15 @@ The paper's response. A **Global / R / G / B** selector at the top scopes most c
 *   **Print Density** (0.0 to 2.0): overall brightness, simulating enlarger exposure time. Lower = brighter, higher = denser.
 *   **ISO-R Grade** (50 to 180): contrast, as a paper ISO-R value. R110 ≈ classic grade 2; **lower R = harder** (more contrast), higher = softer. In R/G/B mode a **Grade** trim rotates one layer's slope about the midtone.
 *   **Shadows Density** (±0.9 ΔD) / **Highlights Density** (±0.5 ΔD): brighten or darken just the shadow or highlight zone, without reshaping the curve. Bounded by paper black/white so a burn can't exceed the print's limits. The ranges differ because density is logarithmic: the same ΔD reads far smaller near paper black than near paper white.
+
+    These two also work on E-6 with **Normalize off**, on the same tones (the centres are mapped by position on each curve's own scale, not by raw density), and they are the only mid-sparing controls there — Grade and Toe both drag the whole scale with them. On a slide, Shadows Density alone lifted the quarter-tone from 0.15 to 0.23 with the highlights unmoved (0.946 to 0.947); getting a comparable lift out of Grade and Toe together also dragged the midtones and cost the highlights.
 *   **Shadows Grade** / **Highlights Grade** (split grade, ±50 ISO-R): rotate contrast locally in the deep shadows or highlights, the digital equivalent of split-grade printing.
 *   **Dye Separation** (0.5 to 1.5, hidden in B&W): saturation in density space. It pushes the print's three dye densities apart *before* the positive is decoded, in the same matrix the paper's own dye crosstalk uses. So it responds to the paper profile you picked, and it eases off automatically where the curve is already compressed at toe and shoulder, instead of forcing colour into tones that have none left to give. Below 1.0 pulls the dyes together instead, toward neutral. 1.0 = off. (Contrast **Chroma** in the Colour tab, which scales colour evenly after decode.)
 *   **Separation Damping** (0 to 1, hidden in B&W): decides *where* the Dye Separation push lands, rather than adding a push of its own. At 0 every colour gets the same treatment. Turn it up and muted colour keeps the full push while colour that is already saturated gets the opposite, so a hard push puts colour into the tones that had none instead of driving the strongest colours until they flatten into a slab. Below 1.0 separation it mirrors: pastels go grey while the vivid colours survive. **Dead at Dye Separation 1.0**, where the slider greys out, because it has no look of its own. This is not the same as backing Dye Separation off: a lower value takes colour from *everything*, including the tones that had little to start with, where turning damping up takes it only from the colours that already have plenty.
 
 **Paper Response**, the characteristic-curve shape:
 
-*   **Paper profile**: a bundled darkroom-paper profile (RA4 colour papers in C-41, tonal B&W papers in B&W). Re-shapes the curve as a baseline; Grade/Density/toe/shoulder still trim on top. *Neutral* reproduces the defaults.
+*   **Paper profile**: a bundled darkroom-paper profile (RA4 colour papers in C-41, tonal B&W papers in B&W). Re-shapes the curve as a baseline; Grade/Density/toe/shoulder still trim on top. *Neutral* reproduces the defaults. Each B&W paper also carries its own lith colour path, which the Lith panel picks up: Fomatone liths warm and colourful, while *Neutral* and Ilford Multigrade stay nearly colourless.
 *   **Paper White**: simulate paper base density, so whites print at ~0.93 instead of pure white, like a real print.
 *   **Paper Black**: show the paper's true (slightly milky) Dmax instead of compensating it to pure display black. Off (default) applies black-point compensation so the adapted eye reads black as black.
 *   **Snap** (-0.5 to 0.5): midtone gamma, steepening or flattening the S-curve around the reference tone while paper white/black stay put.
@@ -432,16 +522,49 @@ Mimics what a lab scanner (Frontier/Noritsu) does automatically. Colour controls
 *   **Glow** (0.0 to 1.0): lens bloom, where bright highlights scatter across all channels for a dreamy softness.
 *   **Halation** (0.0 to 1.0): the red glow of light scattering back through the film base. Highlights only, strongly red-dominant.
 
-<!-- panel:toning -->
-### 7.2 Toning
+<!-- panel:altproc -->
+### 7.2 Alternative Processes
 
-Colour the print itself rather than the scene: chemical toners that convert the silver (B&W only), and a split tint that works in any mode.
+Two printing processes that are not ordinary silver-gelatin enlarging. Pick one with the **None / Lith / Cyanotype** buttons at the top; only that process's controls are shown. Both are B&W only, and both are off by default.
+
+#### Lith
+
+Lith printing is the darkroom process of massively over-exposing a lith-capable paper, developing it in a very dilute low-sulphite developer, then pulling it out part-way through. You get creamy warm highlights and an abrupt drop into hard, sooty blacks, with very little in between.
+
+There is no colour control here. The paper chosen in the Exposure panel sets the whole path, from peach highlights through an olive transition to neutral blacks. *Neutral* and the Ilford papers lith almost colourlessly; Fomatone is the one that gives you the peach and the olive.
+
+While Lith is selected, Sepia, Iron Blue, Copper and Vanadium grey out in the Toning panel, since they do nothing distinctive on a lith print. Selenium and Gold stay live, and behave differently here (see 7.3).
+
+*   **Exposure** (0 to 5 stops, default 2): print over-exposure. Real lith printing runs on two to four stops more light than a normal print. More light means warmer, more colourful highlights and softer gradation.
+*   **Snatch Point** (0.0 to 1.0, default 0.55): how long the print stays in the developer before you pull it. Higher drops the point where the shadows go black further up the tonal scale: deeper, colder blacks and a wider band of undifferentiated shadow. Lower keeps the print high-key and warm, with weak blacks.
+*   **Abruptness** (0.0 to 1.0, default 0.6): how suddenly the shadows go black. High turns the transition into a step, so the next zone down blocks up with no separation left in it. Low leaves a gentle roll into the blacks. In the darkroom this is the hydroquinone-to-alkali ratio of the developer.
+
+#### Cyanotype
+
+A cyanotype is contact-printed in UV onto paper brushed with iron salts. There is no development to time and no silver anywhere in it: the image substance is Prussian blue, which absorbs red light around 700nm, so the print never goes black — it goes blue. Highlights come out green, where the blue mixes with the yellow sensitiser left in the paper.
+
+Two things make it look unlike an enlargement. It only holds a short density range, so a negative that prints normally on paper clips at both ends. And it compresses the midtones, so the middle of the scale is flatter than the ends.
+
+While Cyanotype is selected, every chemical toner greys out in the Toning panel — there is no silver for those baths to react with. Use Bleach and Tannin instead. Split toning still works.
+
+*   **Sensitiser** (Classic or New, default Classic): *Classic (Herschel)* is the original ammonium ferric citrate mix. It loses a lot of its pigment in the wash, so it tops out at a fairly light blue and keeps a strong green stain in the highlights. *New (Ware)* is the ferric oxalate formula: it holds far more pigment through the wash, so it goes much deeper and cleaner.
+*   **Exposure** (-2 to 4 stops, default 0): time under the UV source. More light drives more of the scale into blue; less leaves the print pale and high-key.
+*   **Exposure Scale** (0.8 to 2.8 log D, default 1.4): the negative density range the sensitiser can print — the contrast control. Ware measures about 1.0 to 1.2 for the traditional formula against 2.4 for the new one, and his Simple Cyanotype comes in variants at 1.8, 2.3 and 2.7. A short scale gives a contrastier print that clips both ends.
+*   **Bleach** (0.0 to 0.5, default 0): washing soda. Strips Prussian blue out of the print, highlights first. Take it far enough and only the deepest shadows keep any pigment.
+*   **Tannin** (0.0 to 0.5, default 0): tea, coffee or tannic acid. Re-develops the bleached iron as a brown iron tannate, which covers more than the pigment it replaced, so the print goes browner and a little deeper. Bleach first for a full brown; use Tannin alone for a split blue-brown.
+
+---
+
+<!-- panel:toning -->
+### 7.3 Toning
+
+Colour the print itself rather than the scene: chemical toners that convert the silver (B&W only), and a split tint that works in any mode. Lith silver is much finer than normal print silver, so the toners bite harder and differently on a lith print. With Lith on, only Selenium and Gold stay enabled; with Cyanotype on all six grey out, because there is no silver in the print at all.
 
 **Chemical Toning** (B&W only), simulated as sequential toner baths, in the order shown, each strength 0.0 to 2.0:
 
-*   **Selenium**: deeper blacks, cool eggplant shadows.
+*   **Selenium**: deeper blacks, cool eggplant shadows. On a lith print it reaches much further down the scale, lifts Dmax hard and turns the green-black shadows magenta.
 *   **Sepia**: warm highlights first (partial strength gives split-sepia).
-*   **Gold**: cool blue-black on untoned silver; over sepia, shifts highlights orange-red.
+*   **Gold**: cool blue-black on untoned silver; over sepia, shifts highlights orange-red. On a lith print it works on every density evenly instead of the highlights first, and pushes the print towards blue-violet.
 *   **Iron Blue**: Prussian-blue shadows deepening to navy blacks.
 *   **Copper**: pink to brick-red shift, with the classic Dmax loss.
 *   **Vanadium**: greens the mids/highlights while deep shadows keep their black.
@@ -458,9 +581,9 @@ Colour the print itself rather than the scene: chemical toners that convert the 
 <!-- panel:retouch -->
 ### 8.1 Retouch: dust, hairs, scratches
 
-Spotting, the way it was done with a brush on the finished print. There are three ways to find the marks, by local contrast, by the scanner's IR channel, or by hand, and they stack.
+Spotting, the way it was done with a brush on the finished print. There are three ways to find the marks, by local contrast, by the scanner's IR channel, or by hand, and they stack. However a mark is found, it is repaired the same way: the film under it is rebuilt from the clean film around it, with the frame's own grain transplanted back, and anything too wide for that goes to a fill that follows the structure through.
 
-An **Overlay** button cycles the detection overlay (Off → Marked → IR) so you can see what's being caught.
+An **Overlay** button cycles the detection overlay (Off → Marked → IR) so you can see what's being caught: green for what Optical Removal found, magenta for IR and for defects sent to the structure-following fill.
 
 **Optical Removal** finds specks on the visible scan by local contrast, with no IR needed:
 
@@ -476,10 +599,20 @@ An **Overlay** button cycles the detection overlay (Off → Marked → IR) so yo
 
 **Manual Heal** (header shows the current spot count):
 
-*   **Heal Tool**: click dust spots in the preview to paint them out one at a time.
+The brush marks a *search area*, not a stamp: only the pixels that actually stand out from the film around them are rewritten, so you can paint generously over a speck and the clean grain inside the brush is left exactly as it was. Marks are caught in both directions — dust, which prints light, and scratches, which print dark. If the brush finds nothing wrong, it does nothing.
+
+*   **Heal Tool**: click dust spots in the preview to paint them out one at a time, or drag to paint over a run of them.
 *   **Scratch Tool**: click points along a scratch or hair, double-click/Enter to finish; Esc cancels, Backspace removes the last point. Right-click an overlay to delete it.
-*   **Brush Size** (2 to 16 px): radius of the manual brush (shown while a manual tool is active).
-*   **Undo Last** / **Clear All**: remove the most recent or all manual heals (auto-detected dust is unaffected).
+*   **Transport Line**: for the long straight marks film picks up running through a camera or lab — the ones that cross the whole frame, usually in the same place on every shot of the roll. **Click once anywhere on the scratch** and the whole line is traced and repaired; there is nothing to paint or drag.
+
+    These are the marks the brush is worst at, and not for want of care: spread along its length, a transport scratch is far too faint to pick out from film grain at any single point. The line tool reads the evidence along the whole scratch at once, which is what makes it visible at all. It follows the scratch's own angle (film is rarely square to the sensor), widens the repair to match the scratch, and covers only the stretches where the scratch is actually present, so one that fades in and out is left alone where it fades. If a click finds nothing, it says so rather than touching the frame — click directly on the line.
+
+    Hovering shows a **guide**: the line that would be traced and the band it would repair, before you commit to it. Committed lines stay drawn the same way, so you can see what each one covers; right-click one to delete it.
+
+*   **Line Sensitivity** (0.05 to 0.95, shown while the Transport Line tool is active): how readily a scratch is followed. Lower catches fainter lines and repairs a wider band; raise it if a line starts picking up film either side. It applies to lines already placed as well as new ones, so you can trace first and tune after.
+
+*   **Brush Size** (2 to 16 px): diameter of the manual brush, matching the on-screen cursor (shown while a heal or scratch tool is active).
+*   **Undo Last** / **Clear All**: remove the most recent or all manual heals and traced lines (auto-detected dust is unaffected). Right-click a line to delete just that one.
 
 <!-- panel:finish -->
 ### 8.2 Finishing: vignette, carrier, border
@@ -575,7 +708,7 @@ A scrollable list of every edit step (last 100 kept), newest on top; the current
 
 ### Export button
 
-The primary **Export** action. Its chevron menu picks the scope: current frame (Ctrl+E), selected frames, all visible with current settings, or all visible with each frame's saved settings.
+The primary **Export** action. Its chevron menu picks the scope: current frame (Ctrl+E), selected frames, or all visible frames. Every scope uses the settings below — to deliver the same frames in more than one format or size in a single run, use Export Presets.
 
 ### Format / Size / Colour / Destination
 
@@ -665,6 +798,28 @@ If NegPy crashes on launch or has rendering glitches, you can force backend sett
 *   **Black/blank preview on Windows** → `backend = "dx12"` or `qt_rhi_backend = "software"`.
 *   **Wayland rendering issues** → `qt_platform = "xcb"` to force X11.
 *   **GPU out-of-memory during export** → `max_texture_size = 4096`.
+
+---
+
+## 15. Updating NegPy
+
+NegPy asks GitHub for the newest release once at startup. If there is one, a green **⬇ Update Available: vX.Y.Z** line appears under the logo in the left panel. Click it to open the update window: the release notes, the download size, and one button.
+
+**Install Update** downloads the build that matches how *this* copy was installed, then closes NegPy, installs it over the old version, and reopens on the new one. You do not download, uninstall or reinstall anything by hand. Nothing is replaced until NegPy has exited, so a failed download or a refused permission prompt leaves your working install exactly as it was.
+
+What happens per platform:
+
+| Install | What NegPy fetches | How it installs |
+|---------|--------------------|-----------------|
+| **Windows** | the `-Setup.exe` installer | Runs it silently over your existing install — Windows asks for administrator approval first, because the app lives in Program Files. Approve it *before* NegPy closes. |
+| **macOS** | the `.dmg` for your chip (Apple silicon or Intel) | Mounts the image and replaces the `NegPy.app` bundle where it currently sits, then reopens it. |
+| **Linux** | the `.AppImage` | Replaces the AppImage file you launched, keeps it executable, and relaunches it. |
+
+Your edits, presets, settings and library are untouched: they live in `Documents/NegPy` and the local database, not in the installation folder.
+
+**When the button says "Open Releases Page" instead**, NegPy cannot swap itself and sends you to GitHub. That is the case when you run from a source checkout, when the release has no build for your platform, or when the app was moved somewhere it no longer matches its installer's layout. The same happens if the folder holding the app is not writable by you (an AppImage in a system directory, or an app bundle in a `/Applications` you do not own) — NegPy says so rather than failing halfway.
+
+You can ask for the check again at any time with the **Check for updates** action (unbound by default — give it a key in the shortcut editor).
 
 ---
 

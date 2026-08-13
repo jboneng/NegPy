@@ -23,7 +23,7 @@ from negpy.features.exposure.normalization import (
     measure_clip_fractions,
     measure_neutral_axis_from_log,
     measure_shadow_refs_from_log,
-    resolve_crosstalk_matrix,
+    effective_crosstalk_matrix,
     unmix_log_image,
     measure_textural_range_from_log,
     prefilter_log_grid,
@@ -41,10 +41,23 @@ from negpy.features.geometry.logic import (
 )
 from negpy.features.lab.logic import gaussian_kernel_1d, rl_iterations
 from negpy.features.lab.models import SharpenMethod
+from negpy.features.altprocess.models import AltProcess
+from negpy.features.cyanotype.logic import CYANOTYPE_CONSTANTS, sensitizer_constants
+from negpy.features.lith.logic import LITH_CONSTANTS
 from negpy.features.local.logic import compute_local_maps
+from negpy.features.exposure.transfer import (
+    TRANSFER_CONSTANTS,
+    ZONE_BLACK_TAPER,
+    TRANSFER_DENSITY_RANGE,
+    is_transparency_transfer,
+    transfer_bounds,
+    transfer_curve_params,
+    transfer_widths,
+    zone_geometry,
+)
+from negpy.features.process.capture_color import camera_to_working_matrix
+from negpy.features.process.logic import effective_linear_raw
 from negpy.features.process.models import ProcessMode, per_channel_point_offsets
-from negpy.features.retouch.logic import build_heal_regions
-from negpy.features.retouch.models import HEAL_SIZE_REF
 from negpy.infrastructure.gpu.device import GPUDevice
 from negpy.infrastructure.gpu.resources import GPUBuffer, GPUTexture
 from negpy.infrastructure.gpu.shader_loader import ShaderLoader
@@ -55,6 +68,9 @@ from negpy.services.export.print import PrintService
 from negpy.services.view.coordinate_mapping import CoordinateMapping
 
 logger = get_logger(__name__)
+
+# Mirrors ToningUniforms.alt_mode in toning.wgsl.
+_ALT_MODE = {AltProcess.NONE: 0, AltProcess.LITH: 1, AltProcess.CYANOTYPE: 2}
 
 # Hardware constants
 UNIFORM_ALIGNMENT_DEFAULT = 256
@@ -190,12 +206,12 @@ class GPUEngine:
             "geometry": get_resource_path(os.path.join("negpy", "features", "geometry", "shaders", "transform.wgsl")),
             "normalization": get_resource_path(os.path.join("negpy", "features", "exposure", "shaders", "normalization.wgsl")),
             "exposure": get_resource_path(os.path.join("negpy", "features", "exposure", "shaders", "exposure.wgsl")),
+            "transfer": get_resource_path(os.path.join("negpy", "features", "exposure", "shaders", "transfer.wgsl")),
             "output_encode": get_resource_path(os.path.join("negpy", "features", "exposure", "shaders", "output_encode.wgsl")),
             "autocrop": get_resource_path(os.path.join("negpy", "features", "geometry", "shaders", "autocrop.wgsl")),
             "clahe_hist": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "clahe_hist.wgsl")),
             "clahe_cdf": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "clahe_cdf.wgsl")),
             "clahe_apply": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "clahe_apply.wgsl")),
-            "retouch": get_resource_path(os.path.join("negpy", "features", "retouch", "shaders", "retouch.wgsl")),
             "lab_sharpen_h": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "lab_sharpen_h.wgsl")),
             "lab_sharpen_v": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "lab_sharpen_v.wgsl")),
             "rl_init": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "rl_init.wgsl")),
@@ -203,6 +219,8 @@ class GPUEngine:
             "rl_div_v": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "rl_div_v.wgsl")),
             "rl_mult_v": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "rl_mult_v.wgsl")),
             "lab": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "lab.wgsl")),
+            "lith": get_resource_path(os.path.join("negpy", "features", "lith", "shaders", "lith.wgsl")),
+            "cyanotype": get_resource_path(os.path.join("negpy", "features", "cyanotype", "shaders", "cyanotype.wgsl")),
             "toning": get_resource_path(os.path.join("negpy", "features", "toning", "shaders", "toning.wgsl")),
             "finish": get_resource_path(os.path.join("negpy", "features", "finish", "shaders", "finish.wgsl")),
             "metrics": get_resource_path(os.path.join("negpy", "features", "lab", "shaders", "metrics.wgsl")),
@@ -218,9 +236,11 @@ class GPUEngine:
             "geometry",
             "normalization",
             "exposure",
+            "transfer",
             "clahe_u",
-            "retouch_u",
             "lab",
+            "lith",
+            "cyanotype",
             "toning",
             "finish",
             "layout",
@@ -230,11 +250,13 @@ class GPUEngine:
         # alignment (exposure, 304B) — it then occupies multiple aligned slots.
         self._uniform_sizes = {
             "geometry": 32,
-            "normalization": 112,
+            "normalization": 160,
             "exposure": 304,
+            "transfer": 144,
             "clahe_u": 32,
-            "retouch_u": 16,
             "lab": 96,
+            "lith": 64,
+            "cyanotype": 64,
             "toning": 64,
             "finish": 60,
             "layout": 48,
@@ -255,10 +277,6 @@ class GPUEngine:
         # No config field carries render_size_ref, so a size-only change would
         # otherwise resume past the layout pass.
         self._last_render_size_ref: Optional[float] = None
-        self._retouch_num_regions = 0
-        # Region build+upload cache — retouch re-dispatches on every exposure
-        # frame, and rebuilds aren't free at hundreds of synthesized regions.
-        self._retouch_regions_key: Optional[tuple] = None
         # (radius, scale_factor) of the sharpen taps currently in sharpen_k.
         self._sharpen_kernel_key: Optional[tuple] = None
 
@@ -316,10 +334,10 @@ class GPUEngine:
             return 1
         if last.lab.clahe_strength != settings.lab.clahe_strength:
             return 2
-        if last.retouch != settings.retouch:
-            return 3
         if last.lab != settings.lab:
             return 4
+        if last.altproc != settings.altproc:
+            return 5
         if last.toning != settings.toning:
             return 6
         if last.finish != settings.finish:
@@ -382,8 +400,7 @@ class GPUEngine:
         """Initializes hardware pipelines and persistent buffers."""
         if self._pipelines or not self.gpu.device:
             return
-        # Buffers are recreated below — force the next region/kernel upload.
-        self._retouch_regions_key = None
+        # Buffers are recreated below — force the next kernel upload.
         self._sharpen_kernel_key = None
         t0 = time.perf_counter()
         device = self.gpu.device
@@ -409,9 +426,6 @@ class GPUEngine:
         )
         # Sharpen blur taps (gaussian_kernel_1d): 1024 f32 covers radius ≤ 511.
         self._buffers["sharpen_k"] = GPUBuffer(4096, wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
-        # 512 heal regions × 32 B, and 32K polyline/boundary points × 8 B.
-        self._buffers["retouch_s"] = GPUBuffer(16384, wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
-        self._buffers["retouch_p"] = GPUBuffer(262144, wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
         # Filed-carrier jitter profiles are a fixed table — upload once.
         self._buffers["carrier_s"] = GPUBuffer(carrier_profiles().nbytes, wgpu.BufferUsage.STORAGE | wgpu.BufferUsage.COPY_DST)
         self._buffers["carrier_s"].upload(np.ascontiguousarray(carrier_profiles().ravel(), dtype=np.float32))
@@ -474,6 +488,8 @@ class GPUEngine:
         vignette_full_crop: Optional[Tuple[int, int, int, int]] = None,
         local_maps: Optional[np.ndarray] = None,
         analysis_source_hash: Optional[str] = None,
+        cam_xyz: Optional[list] = None,
+        camera_wb: Optional[list] = None,
     ) -> Tuple[Any, Dict[str, Any]]:
         """
         Executes the full pipeline, returning a GPU texture and associated metrics.
@@ -580,7 +596,7 @@ class GPUEngine:
 
         analysis_source = None
         prefiltered = None
-        unmix_m = resolve_crosstalk_matrix(settings.process.crosstalk_strength, settings.process.crosstalk_matrix)
+        unmix_m = effective_crosstalk_matrix(settings.process, settings.process.process_mode)
         if needs_bounds_analysis or needs_refs or needs_anchor or needs_textural:
             # Use views to avoid copying the full-res image; crop to ROI first.
             analysis_source = img
@@ -672,15 +688,6 @@ class GPUEngine:
 
         pw, ph, cw, ch, ox, oy, _ = self._calculate_layout_dims(settings, crop_w, crop_h, render_size_ref)
 
-        # Regions before uniforms: the uniform block reads the uploaded region count.
-        self._update_retouch_storage(
-            settings.retouch,
-            (h, w),
-            settings.geometry,
-            global_offset,
-            actual_full_dims,
-            distortion_k1=k1_eff,
-        )
         self._upload_unified_uniforms(
             settings,
             bounds,
@@ -698,6 +705,8 @@ class GPUEngine:
             textural_range=textural_range,
             neutral_axis_refs=neutral_axis_refs,
             unmix=unmix_m,
+            cam_xyz=cam_xyz,
+            camera_wb=camera_wb,
         )
         if clahe_cdf_override is not None:
             self._buffers["clahe_c"].upload(clahe_cdf_override)
@@ -827,18 +836,33 @@ class GPUEngine:
                     )
                     # A tiled export passes a per-tile slice — not reusable next frame.
                     self._local_ev_key = None if tiled_maps else ev_key
-            self._dispatch_pass(
-                enc,
-                "exposure",
-                [
-                    (0, tex_norm.view),
-                    (1, tex_expo.view),
-                    (2, self._get_uniform_binding("exposure")),
-                    (3, tex_local_ev.view),
-                ],
-                w_rot,
-                h_rot,
-            )
+            if is_transparency_transfer(settings.process.process_mode, settings.process.e6_normalize):
+                # The transfer curve takes no dodge/burn map: local EV is a print-exposure
+                # input, and the print is exactly what this path replaces.
+                self._dispatch_pass(
+                    enc,
+                    "transfer",
+                    [
+                        (0, tex_norm.view),
+                        (1, tex_expo.view),
+                        (2, self._get_uniform_binding("transfer")),
+                    ],
+                    w_rot,
+                    h_rot,
+                )
+            else:
+                self._dispatch_pass(
+                    enc,
+                    "exposure",
+                    [
+                        (0, tex_norm.view),
+                        (1, tex_expo.view),
+                        (2, self._get_uniform_binding("exposure")),
+                        (3, tex_local_ev.view),
+                    ],
+                    w_rot,
+                    h_rot,
+                )
 
         if settings.lab.clahe_strength > 0:
             if clahe_cdf_override is None and start_stage <= 2:
@@ -877,33 +901,6 @@ class GPUEngine:
         else:
             prev_tex = tex_expo
 
-        # With no regions the shader is an identity copy, but its per-thread MVC arrays
-        # spill to scratch whichever branch a pixel takes, so pass the buffer through.
-        if self._retouch_num_regions > 0:
-            tex_ret = self._get_intermediate_texture(
-                w_rot,
-                h_rot,
-                wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING,
-                "ret",
-            )
-            if start_stage <= 3:
-                self._dispatch_pass(
-                    enc,
-                    "retouch",
-                    [
-                        (0, prev_tex.view),
-                        (1, tex_ret.view),
-                        (2, self._get_uniform_binding("retouch_u")),
-                        (3, self._buffers["retouch_s"]),
-                        (4, self._buffers["retouch_p"]),
-                    ],
-                    w_rot,
-                    h_rot,
-                )
-            tex_healed = tex_ret
-        else:
-            tex_healed = prev_tex
-
         if start_stage <= 4:
             # Sharpen state (USM blur, or RL deconvolution) feeds the lab pass; a
             # 1x1 dummy keeps binding 3 valid when sharpening is off.
@@ -914,7 +911,7 @@ class GPUEngine:
                 # div_v, blur_h, mult_v). Final estimate lands back in rl_a.
                 tex_rl_a = self._get_intermediate_texture(w_rot, h_rot, usage, "rl_a")
                 tex_rl_b = self._get_intermediate_texture(w_rot, h_rot, usage, "rl_b")
-                self._dispatch_pass(enc, "rl_init", [(0, tex_healed.view), (1, tex_rl_a.view)], w_rot, h_rot)
+                self._dispatch_pass(enc, "rl_init", [(0, prev_tex.view), (1, tex_rl_a.view)], w_rot, h_rot)
                 sk = self._buffers["sharpen_k"]
                 for _ in range(rl_iterations(settings.lab.sharpen_radius)):
                     self._dispatch_pass(enc, "rl_blur_h", [(0, tex_rl_a.view), (1, tex_rl_b.view), (2, lab_u), (3, sk)], w_rot, h_rot)
@@ -929,7 +926,7 @@ class GPUEngine:
                     enc,
                     "lab_sharpen_h",
                     [
-                        (0, tex_healed.view),
+                        (0, prev_tex.view),
                         (1, tex_sharpen_h.view),
                         (2, lab_u),
                         (3, self._buffers["sharpen_k"]),
@@ -955,7 +952,7 @@ class GPUEngine:
                 enc,
                 "lab",
                 [
-                    (0, tex_healed.view),
+                    (0, prev_tex.view),
                     (1, tex_lab.view),
                     (2, lab_u),
                     (3, tex_sharpen_v.view),
@@ -965,6 +962,32 @@ class GPUEngine:
             )
 
         tex_pre_toning = tex_lab
+
+        # --- Alternative processes (lith / cyanotype) ---
+        # Mutually exclusive, and no pass at all when neither is picked; toning
+        # then reads tex_lab directly.
+        alt = settings.altproc.alt_process
+        if alt != AltProcess.NONE and settings.process.process_mode == ProcessMode.BW:
+            shader = "lith" if alt == AltProcess.LITH else "cyanotype"
+            tex_alt = self._get_intermediate_texture(
+                w_rot,
+                h_rot,
+                wgpu.TextureUsage.STORAGE_BINDING | wgpu.TextureUsage.TEXTURE_BINDING | wgpu.TextureUsage.COPY_SRC,
+                shader,
+            )
+            if start_stage <= 5:
+                self._dispatch_pass(
+                    enc,
+                    shader,
+                    [
+                        (0, tex_lab.view),
+                        (1, tex_alt.view),
+                        (2, self._get_uniform_binding(shader)),
+                    ],
+                    w_rot,
+                    h_rot,
+                )
+            tex_pre_toning = tex_alt
 
         if start_stage <= 6:
             self._dispatch_pass(
@@ -1153,6 +1176,8 @@ class GPUEngine:
             Tuple[Tuple[float, float, float], Tuple[float, float, float], Optional[Tuple[float, float, float]], float]
         ] = None,
         unmix: Optional[np.ndarray] = None,
+        cam_xyz: Optional[list] = None,
+        camera_wb: Optional[list] = None,
     ) -> None:
         """Packs and uploads all pipeline parameters to the unified UBO."""
         # scale_s uses the post-rotation dims the geometry pass emits. Zeroed for tiled
@@ -1184,10 +1209,26 @@ class GPUEngine:
         adj_floors = (f[0] + wp3[0], f[1] + wp3[1], f[2] + wp3[2])
         adj_ceils = (c[0] + bp3[0], c[1] + bp3[1], c[2] + bp3[2])
 
+        # Transparency transfer: the fixed window, with no WP/BP trims — mirrors
+        # NormalizationProcessor._process_transparency, whose identity they would break.
+        if is_transparency_transfer(settings.process.process_mode, settings.process.e6_normalize):
+            t_floors, t_ceils = transfer_bounds()
+            adj_floors, adj_ceils = t_floors, t_ceils
+
         # Capture-side dye-unmix rows, resolved once per frame by the caller
         # (shared with NormalizationProcessor); identity when off.
         if unmix is None:
             unmix = np.eye(3)
+
+        # Working-space-from-camera rows; identity when the source carries no matrix
+        # (the shader only reads them on the transfer path).
+        # Linear RAW decodes without white balance; fold the as-shot multipliers back
+        # in so the render does not depend on which decode produced the buffer.
+        cam = camera_to_working_matrix(
+            cam_xyz, camera_wb if effective_linear_raw(settings.process, settings.exposure.render_intent) else None
+        )
+        if cam is None:
+            cam = np.eye(3, dtype=np.float32)
 
         n_data = (
             struct.pack("ffff", adj_floors[0], adj_floors[1], adj_floors[2], 0.0)
@@ -1202,6 +1243,9 @@ class GPUEngine:
             + struct.pack("ffff", unmix[0, 0], unmix[0, 1], unmix[0, 2], 0.0)
             + struct.pack("ffff", unmix[1, 0], unmix[1, 1], unmix[1, 2], 0.0)
             + struct.pack("ffff", unmix[2, 0], unmix[2, 1], unmix[2, 2], 0.0)
+            + struct.pack("ffff", float(cam[0, 0]), float(cam[0, 1]), float(cam[0, 2]), 0.0)
+            + struct.pack("ffff", float(cam[1, 0]), float(cam[1, 1]), float(cam[1, 2]), 0.0)
+            + struct.pack("ffff", float(cam[2, 0]), float(cam[2, 1]), float(cam[2, 2]), 0.0)
         )
 
         from negpy.features.exposure.logic import (
@@ -1220,6 +1264,42 @@ class GPUEngine:
         )
         from negpy.features.exposure.models import EXPOSURE_CONSTANTS
         from negpy.features.exposure.normalization import LogNegativeBounds, luminance_density_range
+
+        # Transparency transfer params (mirrors transfer.py; inert on the print path).
+        tc = TRANSFER_CONSTANTS
+        t_exp, t_contrast, t_toe3, t_sh3 = transfer_curve_params(settings.exposure)
+        t_tw3, t_sw3 = transfer_widths(settings.exposure)
+        t_cmy = filtration_offsets(
+            (settings.exposure.wb_cyan, settings.exposure.wb_magenta, settings.exposure.wb_yellow),
+            LogNegativeBounds(floors=adj_floors, ceils=adj_ceils),
+        )
+        t_sh_c, t_hi_c, t_zone_k = zone_geometry()
+        tr_data = (
+            struct.pack(
+                "ffffffff",
+                float(t_exp),
+                float(t_contrast),
+                float(TRANSFER_DENSITY_RANGE),
+                float(t_zone_k),
+                float(tc["transfer_contrast_pivot"]),
+                float(tc["transfer_toe_knee"]),
+                float(tc["transfer_shoulder_knee"]),
+                float(2.0 ** float(tc["transfer_baseline_ev"])),
+            )
+            + struct.pack("ffff", t_toe3[0], t_toe3[1], t_toe3[2], 0.0)
+            + struct.pack("ffff", t_sh3[0], t_sh3[1], t_sh3[2], 0.0)
+            + struct.pack("ffff", t_tw3[0], t_tw3[1], t_tw3[2], 0.0)
+            + struct.pack("ffff", t_sw3[0], t_sw3[1], t_sw3[2], 0.0)
+            + struct.pack("ffff", t_cmy[0], t_cmy[1], t_cmy[2], 0.0)
+            + struct.pack(
+                "ffff",
+                float(settings.exposure.shadow_density),
+                float(settings.exposure.highlight_density),
+                float(t_sh_c),
+                float(t_hi_c),
+            )
+            + struct.pack("ffff", float(ZONE_BLACK_TAPER), 0.0, 0.0, 0.0)
+        )
         from negpy.features.exposure.papers import (
             compose_density_matrices,
             effective_constants,
@@ -1401,14 +1481,6 @@ class GPUEngine:
             + b"\x00" * 8
         )
 
-        r_u_data = struct.pack(
-            "IIii",
-            self._retouch_num_regions,
-            0,
-            offset[0],
-            offset[1],
-        )
-
         lab = settings.lab
         # Sharpen taps are computed once in Python (gaussian_kernel_1d — the same
         # array the CPU convolves with) and uploaded to sharpen_k; the shaders only
@@ -1441,6 +1513,50 @@ class GPUEngine:
         )
 
         is_bw = 1 if settings.process.process_mode == ProcessMode.BW else 0
+
+        altproc = settings.altproc
+        lc = LITH_CONSTANTS
+        lith_dmax = float(pc["d_max"])
+        lith_over = 0.301 * float(altproc.lith_exposure)
+        li_data = (
+            struct.pack("ffff", *[float(p[0]) for p in paper.lith_path])
+            + struct.pack("ffff", *[float(p[1]) for p in paper.lith_path])
+            + struct.pack(
+                "ffff",
+                lith_over,
+                lith_over * float(lc["foot_veil"]),
+                lith_dmax * (lc["knee_lo"] - lc["knee_span"] * float(altproc.lith_snatch)),
+                max(lc["abrupt_lo"] - lc["abrupt_span"] * float(altproc.lith_abruptness), 0.01),
+            )
+            # 12 bytes of tail padding: two vec4s force a 16-byte struct align, so
+            # WGSL rounds LithUniforms up to 64 and the binding size must match.
+            + struct.pack("f", lith_dmax)
+            + b"\x00" * 12
+        )
+
+        cs = sensitizer_constants(altproc.cyano_sensitizer)
+        cc = CYANOTYPE_CONSTANTS
+        cy_data = (
+            struct.pack("ffff", *[float(p[0]) for p in cs["path"]])
+            + struct.pack("ffff", *[float(p[1]) for p in cs["path"]])
+            + struct.pack(
+                "ffff",
+                0.301 * float(altproc.cyano_exposure),
+                max(float(altproc.cyano_scale), 0.1),
+                float(altproc.cyano_bleach),
+                float(altproc.cyano_tannin),
+            )
+            # 4 bytes of tail padding, as for lith: the leading vec4s round
+            # CyanoUniforms up to 64 and the binding size must match.
+            + struct.pack(
+                "fff",
+                float(cs["d_max"]),
+                float(cc["brown_dir"][0]),
+                float(cc["brown_dir"][1]),
+            )
+            + b"\x00" * 4
+        )
+
         t_data = (
             struct.pack(
                 "ffff",
@@ -1464,10 +1580,11 @@ class GPUEngine:
                 float(settings.toning.highlight_tint_strength),
             )
             + struct.pack(
-                "fff",
+                "fffI",
                 float(settings.toning.blue_strength),
                 float(settings.toning.copper_strength),
                 float(settings.toning.vanadium_strength),
+                _ALT_MODE.get(altproc.alt_process, 0) if is_bw else 0,
             )
         )
 
@@ -1514,64 +1631,14 @@ class GPUEngine:
         dh_data = struct.pack("IIII", crop_offset[0], crop_offset[1], crop_w, crop_h)
 
         full_buffer = bytearray()
-        for name, d in zip(self._uniform_names, [g_data, n_data, e_data, c_data, r_u_data, l_data, t_data, f_data, y_data, dh_data]):
+        for name, d in zip(
+            self._uniform_names, [g_data, n_data, e_data, tr_data, c_data, l_data, li_data, cy_data, t_data, f_data, y_data, dh_data]
+        ):
             full_buffer += d + b"\x00" * (self._slot_bytes(name) - len(d))
 
         if not self.gpu.device:
             raise RuntimeError("GPU device lost")
         self.gpu.device.queue.write_buffer(self._buffers["unified_u"].buffer, 0, full_buffer)
-
-    def _update_retouch_storage(
-        self,
-        conf: Any,
-        orig_shape: Tuple[int, int],
-        geom: Any,
-        offset: Tuple[int, int],
-        full_dims: Tuple[int, int],
-        distortion_k1: float = 0.0,
-    ) -> None:
-        """Uploads heal regions (capsule chains + boundary loops) to GPU storage."""
-        key = (conf.manual_heal_strokes, conf.manual_dust_spots, orig_shape, geom, full_dims, distortion_k1)
-        if key == self._retouch_regions_key:
-            return
-        self._retouch_regions_key = key
-        self._retouch_num_regions = 0
-        if not (conf.manual_heal_strokes or conf.manual_dust_spots):
-            return
-
-        reg_i, reg_f, pts = build_heal_regions(
-            conf.manual_heal_strokes,
-            conf.manual_dust_spots,
-            orig_shape,
-            geom.rotation,
-            geom.fine_rotation,
-            geom.flip_horizontal,
-            geom.flip_vertical,
-            distortion_k1,
-            full_dims,
-        )
-        n_entries = len(conf.manual_heal_strokes) + len(conf.manual_dust_spots)
-        if len(reg_i) < n_entries:
-            logger.warning("Retouch storage full: %d of %d heals uploaded", len(reg_i), n_entries)
-        if len(reg_i) == 0:
-            return
-
-        reg_data = bytearray()
-        for k in range(len(reg_i)):
-            reg_data += struct.pack(
-                "IIIIffff",
-                int(reg_i[k, 0]),
-                int(reg_i[k, 1]),
-                int(reg_i[k, 2]),
-                int(reg_i[k, 3]),
-                float(reg_f[k, 0]),
-                float(reg_f[k, 3]),
-                float(reg_f[k, 1]),
-                float(reg_f[k, 2]),
-            )
-        self._buffers["retouch_s"].upload(np.frombuffer(reg_data, dtype=np.uint8))
-        self._buffers["retouch_p"].upload(np.ascontiguousarray(pts, dtype=np.float32))
-        self._retouch_num_regions = len(reg_i)
 
     def _calculate_layout_dims(
         self, settings: WorkspaceConfig, cw: int, ch: int, size_ref: Optional[float]
@@ -1802,6 +1869,8 @@ class GPUEngine:
         scale_factor: float = 1.0,
         bounds_override: Optional[Any] = None,
         readback_metrics: bool = True,
+        cam_xyz: Optional[list] = None,
+        camera_wb: Optional[list] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """High-level processing entry point with automatic tiling."""
         self._init_resources()
@@ -1810,13 +1879,15 @@ class GPUEngine:
         rot = settings.geometry.rotation % 4
         w_rot, h_rot = (h, w) if rot in (1, 3) else (w, h)
         if w_rot > max_tex or h_rot > max_tex or (w * h > TILING_THRESHOLD_PX):
-            return self._process_tiled(img, settings, scale_factor, bounds_override=bounds_override)
+            return self._process_tiled(img, settings, scale_factor, bounds_override=bounds_override, cam_xyz=cam_xyz, camera_wb=camera_wb)
         tex_final, metrics = self.process_to_texture(
             img,
             settings,
             scale_factor=scale_factor,
             bounds_override=bounds_override,
             readback_metrics=readback_metrics,
+            cam_xyz=cam_xyz,
+            camera_wb=camera_wb,
         )
         return self._readback_downsampled(tex_final), metrics
 
@@ -1826,6 +1897,8 @@ class GPUEngine:
         settings: WorkspaceConfig,
         scale_factor: float,
         bounds_override: Optional[Any] = None,
+        cam_xyz: Optional[list] = None,
+        camera_wb: Optional[list] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
         """Processes ultra-high resolution images using memory-efficient tiling."""
         h, w = img.shape[:2]
@@ -1877,7 +1950,9 @@ class GPUEngine:
         ):
             reused_cdf = self._readback_clahe_cdf()
 
-        _, metrics_ref = self.process_to_texture(img_small, settings, scale_factor=scale_factor, clahe_cdf_override=reused_cdf)
+        _, metrics_ref = self.process_to_texture(
+            img_small, settings, scale_factor=scale_factor, clahe_cdf_override=reused_cdf, cam_xyz=cam_xyz, camera_wb=camera_wb
+        )
 
         global_cdfs = reused_cdf if reused_cdf is not None else self._readback_clahe_cdf()
 
@@ -1919,7 +1994,7 @@ class GPUEngine:
 
         # Unmixed like the non-tiled path, lazily (skipped when bounds are locked and
         # no auto refs/anchor/textural need it).
-        unmix_m = resolve_crosstalk_matrix(settings.process.crosstalk_strength, settings.process.crosstalk_matrix)
+        unmix_m = effective_crosstalk_matrix(settings.process, settings.process.process_mode)
         prefiltered_cache: Optional[np.ndarray] = None
 
         def _prefiltered() -> np.ndarray:
@@ -1962,20 +2037,9 @@ class GPUEngine:
         paper_w, paper_h, content_w, content_h, off_x, off_y, _ = self._calculate_layout_dims(settings, crop_w, crop_h, None)
         full_source_res = np.zeros((crop_h, crop_w, 3), dtype=np.float32)
 
-        # Heal regions sample up to the membrane ring (radius + 2px·scale) plus
-        # |source offset| beyond a pixel, so the halo must grow with them or
-        # tile-edge heals read clamped garbage.
+        # Defect repairs are baked into the source before the engine, so no stage here
+        # samples beyond its own pixel for them and the halo owes them nothing.
         halo = TILE_HALO
-        ret = settings.retouch
-        ref_scale = max(w_rot, h_rot) / HEAL_SIZE_REF
-        rim_px = int(np.ceil(2.0 * ref_scale))
-        for stroke in ret.manual_heal_strokes:
-            size, sdx, sdy = stroke[1], stroke[2], stroke[3]
-            off_px = float(np.hypot(sdx * w_rot, sdy * h_rot))
-            halo = max(halo, int(np.ceil(size * ref_scale * 0.5 + off_px)) + rim_px + 2)
-        for _x, _y, size in ret.manual_dust_spots:
-            # Legacy spots get a golden-angle fallback offset of 2.6·size px.
-            halo = max(halo, int(np.ceil(size * (ref_scale * 0.5 + 2.6))) + rim_px + 2)
         # The sharpen blur reads ±kernel-radius px, which outgrows TILE_HALO at
         # large radii — without this, tile seams show in the USM band.
         # RL's influence spreads with iterations but decays geometrically; 6× the
@@ -2019,6 +2083,8 @@ class GPUEngine:
                     apply_layout=False,
                     vignette_full_crop=(crop_w, crop_h, tx - ox, ty - oy),
                     local_maps=maps_tile,
+                    cam_xyz=cam_xyz,
+                    camera_wb=camera_wb,
                 )
                 full_source_res[ty : ty + th, tx : tx + tw] = self._readback_downsampled(tile_res)[oy : oy + th, ox : ox + tw]
 
@@ -2039,10 +2105,15 @@ class GPUEngine:
         result[off_y : off_y + content_h, off_x : off_x + content_w] = scaled_content
         return result, metrics_ref
 
-    def cleanup(self, collect: bool = True) -> None:
-        """Evacuates the texture pool; optionally forces garbage collection."""
+    def cleanup(self, collect: bool = True, retain: Optional[GPUTexture] = None) -> None:
+        """Evacuates the texture pool; optionally forces garbage collection.
+
+        ``retain`` is handed to the caller instead: its pool key goes with it, so the
+        next render allocates a fresh one rather than painting over borrowed pixels.
+        """
         for tex in self._tex_cache.values():
-            tex.destroy()
+            if tex is not retain:
+                tex.destroy()
         self._tex_cache.clear()
         # Bind groups reference the destroyed views — drop them.
         self._bind_group_cache.clear()

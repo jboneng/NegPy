@@ -10,9 +10,13 @@ from negpy.domain.interfaces import PipelineContext
 from negpy.domain.models import WorkspaceConfig
 from negpy.features.exposure.analysis import output_histogram, proof_grid, rotate_grid, strip_mosaic
 from negpy.features.flatfield.logic import apply_flatfield
+from negpy.features.hdr.models import HdrConfig, hdr_active
 from negpy.features.geometry.batch_autocrop import detect_crop_candidate, resolve_roll_crops
 from negpy.features.process.sensor import apply_sensor_correction, effective_sensor_matrix
-from negpy.features.rgbscan.models import is_rgb_triplet
+from negpy.features.process.logic import effective_linear_raw
+from negpy.infrastructure.loaders.helpers import unsupported_raw_reason
+from negpy.features.rgbscan.models import RgbScanConfig, is_rgb_triplet
+from negpy.features.stitch.models import StitchConfig, stitch_active
 from negpy.features.geometry.processor import GeometryProcessor
 from negpy.infrastructure.display.color_spaces import WORKING_COLOR_SPACE
 from negpy.infrastructure.gpu.resources import GPUTexture
@@ -50,6 +54,10 @@ class RenderTask:
     interactive: bool = False
     # Only the controller knows whether the filmstrip is already current for this config.
     wants_thumbnail: bool = False
+    # Decoder XYZ->camera matrix for this source; only the transparency transfer reads it.
+    cam_xyz: Optional[list] = None
+    # As-shot WB multipliers, needed only when the buffer was decoded without WB.
+    camera_wb: Optional[list] = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +74,10 @@ class TestStripTask:
     grid: tuple
     gpu_enabled: bool = True
     ir_buffer: Optional[np.ndarray] = None
+    # Decoder XYZ->camera matrix for this source; only the transparency transfer reads it.
+    cam_xyz: Optional[list] = None
+    # As-shot WB multipliers, needed only when the buffer was decoded without WB.
+    camera_wb: Optional[list] = None
 
 
 @dataclass(frozen=True)
@@ -139,6 +151,7 @@ class AssetDiscoveryTask:
     restore_triplets: dict | None = None  # {red_path: [green, blue]} — rebuild known triplets (session restore).
     half_frame: bool = False  # Expand each file into two half-frame assets (left/right).
     restore_stitches: dict | None = None  # {primary_path: {paths, transforms, canvas, sizes, hash}} (session restore).
+    restore_hdr: dict | None = None  # {reference_path: {paths, ratios, align, hash}} (session restore).
     half_frame_profile: dict | None = None  # {crop_rect, split_x, gutter_thickness} override
 
 
@@ -154,15 +167,12 @@ class PreviewLoadTask:
     use_splash: bool = True
     for_cache_warm: bool = False
     detect_mode: bool = False  # run process-mode autodetect (new files only)
-    green_path: str = ""  # RGB-scan triplet: green/blue exposures merged with file_path (red).
-    blue_path: str = ""
-    align: bool = True  # sub-pixel registration of the triplet
-    stitch_paths: tuple[str, ...] = ()  # stitch composite: non-primary parts + stored registration
-    stitch_transforms: tuple[tuple[float, ...], ...] = ()
-    stitch_canvas: tuple[int, int] = (0, 0)
-    stitch_sizes: tuple[tuple[int, int], ...] = ()
-    stitch_triplets: tuple[tuple[str, str], ...] = ()  # per-part (green, blue) RGB-scan exposures
-    stitch_align: bool = True
+    # The assembly configs travel whole rather than flattened into loose fields. They are
+    # frozen and hashable, the worker rebuilt them from the pieces anyway, and a field
+    # added to one of them then needs no change here or at the call site.
+    rgbscan: RgbScanConfig = RgbScanConfig()  # triplet: green/blue exposures merged with file_path (red)
+    stitch: StitchConfig = StitchConfig()  # composite: non-primary parts + stored registration
+    hdr: HdrConfig = HdrConfig()  # bracket: the other exposures, merged with file_path (the reference)
     flatfield_profile_id: str = ""  # per-part flat-field profile for stitch previews
     half_slice: tuple[int, float, tuple[float, float, float, float] | None, float] | None = (
         None  # (half, split_x, crop_rect, gutter_thickness)
@@ -191,10 +201,10 @@ class RenderWorker(QObject):
     def processor(self) -> ImageProcessor:
         return self._processor
 
-    @pyqtSlot()
-    def cleanup(self) -> None:
-        """Evacuates transient GPU resources."""
-        self._processor.cleanup()
+    @pyqtSlot(object)
+    def cleanup(self, retain: object = None) -> None:
+        """Evacuates transient GPU resources; ``retain`` is handed to its new owner."""
+        self._processor.cleanup(retain=retain)
 
     def destroy_all(self) -> None:
         """Full teardown of processing resources."""
@@ -216,6 +226,8 @@ class RenderWorker(QObject):
                 readback_metrics=task.readback_metrics,
                 ir_buffer=task.ir_buffer,
                 crop_preview_full=task.crop_preview_full,
+                cam_xyz=task.cam_xyz,
+                camera_wb=task.camera_wb,
             )
 
             # CPU renders have no in-shader histogram; bin the float output here.
@@ -272,6 +284,8 @@ class RenderWorker(QObject):
                     readback_metrics=False,
                     ir_buffer=task.ir_buffer,
                     wants_uv_grid=False,
+                    cam_xyz=task.cam_xyz,
+                    camera_wb=task.camera_wb,
                 )
                 if isinstance(result, GPUTexture):
                     result = result.readback()
@@ -426,6 +440,9 @@ class AssetDiscoveryWorker(QObject):
         if task.restore_stitches and valid_assets:
             valid_assets = self._attach_restored_stitches(valid_assets, task.restore_stitches)
 
+        if task.restore_hdr and valid_assets:
+            valid_assets = self._attach_restored_hdr(valid_assets, task.restore_hdr)
+
         if task.half_frame and valid_assets:
             valid_assets = self._expand_half_frames(valid_assets, profile=task.half_frame_profile)
 
@@ -433,7 +450,8 @@ class AssetDiscoveryWorker(QObject):
 
     def _expand_half_frames(self, assets: list, profile: dict | None = None) -> list:
         """Expand each file into two half-frame assets sharing the path, with
-        per-half hash/name identities. Triplet assets stay whole (unsupported combo).
+        per-half hash/name identities. Composite assets (triplet, stitch, HDR) stay
+        whole — an unsupported combination.
 
         When ``profile`` is set (a {crop_rect, split_x, gutter_thickness} dict saved
         from the half-frame rectangle editor), it overrides the auto-detected split
@@ -443,7 +461,7 @@ class AssetDiscoveryWorker(QObject):
 
         out = []
         for i, a in enumerate(assets):
-            if a.get("green_path") or a.get("stitch_paths"):
+            if a.get("green_path") or a.get("stitch_paths") or a.get("hdr_paths"):
                 out.append(a)
                 continue
             self.progress.emit(i + 1, len(assets), f"Split {a['name']}")
@@ -511,6 +529,36 @@ class AssetDiscoveryWorker(QObject):
                         "stitch_sizes": tuple((int(s[0]), int(s[1])) for s in entry["sizes"]),
                         "stitch_triplets": tuple((str(t[0]), str(t[1])) for t in entry.get("triplets") or ()),
                         "stitch_align": bool(entry.get("align", True)),
+                        "process_mode": entry.get("process_mode", ""),
+                    }
+                )
+            else:
+                out.append(a)
+        return out
+
+    def _attach_restored_hdr(self, assets: list, merges: dict) -> list:
+        """Re-attach saved brackets to restored reference assets (no re-solve). A merge whose
+        exposures vanished from disk restores as a plain asset."""
+        import os
+
+        from negpy.features.hdr.models import hdr_name
+
+        out = []
+        for a in assets:
+            entry = merges.get(a["path"])
+            if entry and entry.get("paths") and all(os.path.exists(p) for p in entry["paths"]):
+                out.append(
+                    {
+                        **a,
+                        "name": hdr_name([a["path"], *entry["paths"]]),
+                        "hash": entry["hash"],
+                        # The composite hash is the bracket's — inheriting the reference
+                        # frame's legacy digest would rehome that frame's edit onto it.
+                        "legacy_hash": "",
+                        "hdr_paths": tuple(entry["paths"]),
+                        "hdr_ratios": tuple(float(r) for r in entry.get("ratios") or ()),
+                        "hdr_align": bool(entry.get("align", True)),
+                        "hdr_anchor": str(entry.get("anchor", "") or ""),
                     }
                 )
             else:
@@ -555,8 +603,8 @@ class PreviewLoadWorker(QObject):
     Keeps the UI thread free during slow I/O and demosaicing.
     """
 
-    # (file_path, raw, dims, source_cs, ir_preview, detected_mode)
-    finished = pyqtSignal(str, object, object, str, object, str)
+    # (file_path, raw, dims, source_cs, ir_preview, detected_mode, (cam_xyz, camera_wb))
+    finished = pyqtSignal(str, object, object, str, object, str, object)
     splash = pyqtSignal(str, object, object)  # (file_path, buffer, dims) — first paint
     error = pyqtSignal(str)
     # (file_path, message) — error carries no path, so badge attribution needs this
@@ -583,23 +631,12 @@ class PreviewLoadWorker(QObject):
             return
         t0 = time.perf_counter()
         try:
-            if task.stitch_paths:
+            if stitch_active(task.stitch):
                 # Stitch composite: replay the stored registration at preview scale.
                 # No splash — the primary's embedded JPEG would flash a half frame.
-                from negpy.features.stitch.models import StitchConfig
-
-                stitch_cfg = StitchConfig(
-                    stitch_enabled=True,
-                    stitch_paths=task.stitch_paths,
-                    stitch_transforms=task.stitch_transforms,
-                    stitch_canvas=task.stitch_canvas,
-                    stitch_sizes=task.stitch_sizes,
-                    stitch_triplets=task.stitch_triplets,
-                    stitch_align=task.stitch_align,
-                )
                 raw, dims, metadata = self._preview_service.load_linear_preview_stitch(
                     task.file_path,
-                    stitch_cfg,
+                    task.stitch,
                     task.workspace_color_space,
                     use_camera_wb=task.use_camera_wb,
                     full_resolution=task.full_resolution,
@@ -614,20 +651,43 @@ class PreviewLoadWorker(QObject):
                     (time.perf_counter() - t0) * 1000,
                     task.file_path,
                 )
-                self.finished.emit(task.file_path, raw, dims, source_cs, ir_preview, detected_mode)
+                self.finished.emit(
+                    task.file_path, raw, dims, source_cs, ir_preview, detected_mode, (metadata.get("cam_xyz"), metadata.get("camera_wb"))
+                )
                 return
-            if task.green_path and task.blue_path:
-                # RGB-scan triplet: assemble the frame from the three exposures.
-                # No splash — the red embedded JPEG would flash a red-cast preview.
-                raw, dims, metadata = self._preview_service.load_linear_preview_rgb(
+            if hdr_active(task.hdr):
+                # Bracketed capture: merge the exposures into one linear source. No splash —
+                # the reference frame's embedded JPEG would flash the unmerged exposure.
+                raw, dims, metadata = self._preview_service.load_linear_preview_hdr(
                     task.file_path,
-                    task.green_path,
-                    task.blue_path,
+                    task.hdr,
                     task.workspace_color_space,
                     use_camera_wb=task.use_camera_wb,
                     full_resolution=task.full_resolution,
                     file_hash=task.file_hash,
-                    align=task.align,
+                )
+                source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
+                ir_preview = metadata.get("ir_preview")
+                detected_mode = self._detect_mode(task, raw) if task.detect_mode else ""
+                logger.info(
+                    "load-timing preview_worker_total %.0fms (hdr load->buffer) %s",
+                    (time.perf_counter() - t0) * 1000,
+                    task.file_path,
+                )
+                self.finished.emit(
+                    task.file_path, raw, dims, source_cs, ir_preview, detected_mode, (metadata.get("cam_xyz"), metadata.get("camera_wb"))
+                )
+                return
+            if is_rgb_triplet(task.rgbscan):
+                # RGB-scan triplet: assemble the frame from the three exposures.
+                # No splash — the red embedded JPEG would flash a red-cast preview.
+                raw, dims, metadata = self._preview_service.load_linear_preview_rgb(
+                    task.file_path,
+                    task.rgbscan,
+                    task.workspace_color_space,
+                    use_camera_wb=task.use_camera_wb,
+                    full_resolution=task.full_resolution,
+                    file_hash=task.file_hash,
                 )
                 source_cs = metadata.get("color_space") or WORKING_COLOR_SPACE
                 ir_preview = metadata.get("ir_preview")
@@ -637,7 +697,9 @@ class PreviewLoadWorker(QObject):
                     (time.perf_counter() - t0) * 1000,
                     task.file_path,
                 )
-                self.finished.emit(task.file_path, raw, dims, source_cs, ir_preview, detected_mode)
+                self.finished.emit(
+                    task.file_path, raw, dims, source_cs, ir_preview, detected_mode, (metadata.get("cam_xyz"), metadata.get("camera_wb"))
+                )
                 return
             if task.use_splash and not task.full_resolution:
                 # Open the file once; get splash + linear in a single pass.
@@ -671,11 +733,18 @@ class PreviewLoadWorker(QObject):
                 (time.perf_counter() - t0) * 1000,
                 task.file_path,
             )
-            self.finished.emit(task.file_path, raw, dims, source_cs, ir_preview, detected_mode)
+            self.finished.emit(
+                task.file_path, raw, dims, source_cs, ir_preview, detected_mode, (metadata.get("cam_xyz"), metadata.get("camera_wb"))
+            )
         except Exception as e:
             logger.exception(f"Asset load failed: {task.file_path}")
-            self.error.emit(str(e))
-            self.load_failed.emit(task.file_path, str(e))
+            # libraw reports "Unsupported file format or not RAW file" for a file whose
+            # tags it parsed perfectly and whose payload it cannot decode, which reads as
+            # "your NEF is broken". Ask why only once the decode has actually failed, so
+            # the check costs nothing on the files that work.
+            message = unsupported_raw_reason(task.file_path) or str(e)
+            self.error.emit(message)
+            self.load_failed.emit(task.file_path, message)
 
     def _detect_mode(self, task: PreviewLoadTask, raw) -> str:
         """Classify film process mode; re-decode no-WB since the C41 mask is hidden by camera WB."""
@@ -756,19 +825,15 @@ class BatchAutoCropWorker(QObject):
         config = frame.config
         rgbscan = config.rgbscan
         common = {
-            "use_camera_wb": not config.process.linear_raw,
+            "use_camera_wb": not effective_linear_raw(config.process, config.exposure.render_intent),
             "full_resolution": False,
             "file_hash": base_hash(file_info.get("hash")),  # halves share one decode
         }
-        if rgbscan.enabled and rgbscan.green_path and rgbscan.blue_path:
-            raw, _, _ = self._preview_service.load_linear_preview_rgb(
-                file_info["path"],
-                rgbscan.green_path,
-                rgbscan.blue_path,
-                workspace_color_space,
-                align=rgbscan.align,
-                **common,
-            )
+        hdr = config.hdr
+        if hdr.hdr_enabled and hdr.hdr_paths:
+            raw, _, _ = self._preview_service.load_linear_preview_hdr(file_info["path"], hdr, workspace_color_space, **common)
+        elif rgbscan.enabled and rgbscan.green_path and rgbscan.blue_path:
+            raw, _, _ = self._preview_service.load_linear_preview_rgb(file_info["path"], rgbscan, workspace_color_space, **common)
         else:
             raw, _, _ = self._preview_service.load_linear_preview(
                 file_info["path"],
@@ -932,7 +997,10 @@ class NormalizationWorker(QObject):
                     process_mode = params.process.process_mode if params else DEFAULT_WORKSPACE_CONFIG.process.process_mode
                     e6_normalize = params.process.e6_normalize if params else DEFAULT_WORKSPACE_CONFIG.process.e6_normalize
                     geometry = params.geometry if params else DEFAULT_WORKSPACE_CONFIG.geometry
-                    linear_raw = params.process.linear_raw if params else DEFAULT_WORKSPACE_CONFIG.process.linear_raw
+                    # effective_, not the stored flag: the transfer path decodes neutral whatever
+                    # the flag says, and the comment below is the reason this has to match it.
+                    _an = params if params else DEFAULT_WORKSPACE_CONFIG
+                    linear_raw = effective_linear_raw(_an.process, _an.exposure.render_intent)
 
                     # Use to_thread for blocking CPU/IO bound load and analysis.
                     # Decode with the SAME WB the render path uses (use_camera_wb =
