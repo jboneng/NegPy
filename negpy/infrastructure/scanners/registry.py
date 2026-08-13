@@ -32,7 +32,7 @@ DEFAULT_BACKEND_ID = "plustek" if sys.platform == "win32" else "sane"
 # id -> (display label, factory). Insertion order drives the sidebar dropdown.
 # SANE is Unix-only (python-sane); Windows ships Plustek USB alone.
 BACKENDS: dict[str, tuple[str, Callable[[], ScannerBackend]]] = {
-    "plustek": ("Plustek (USB)", _make_plustek),
+    "plustek": ("pyOpticfilm (Plustek)", _make_plustek),
 }
 if sys.platform != "win32":
     BACKENDS = {

@@ -37,7 +37,7 @@ uv sync --group plustek
 make run
 ```
 
-Or use a Windows release build (pyopticfilm, PyUSB, and libusb are bundled). In the Scan tab, Backend should be **Plustek (USB)**. Refresh the device list; the SE should appear when WinUSB is bound.
+Or use a Windows release build (pyopticfilm, PyUSB, and libusb are bundled). In the Scan tab, Backend should be **pyOpticfilm (Plustek)**. Refresh the device list; the SE should appear when WinUSB is bound.
 
 ## 4. Restoring the vendor driver
 

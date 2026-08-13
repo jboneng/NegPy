@@ -7,7 +7,7 @@ from negpy.infrastructure.scanners.base import ScannerUnavailable
 
 
 def test_backend_choices_include_plustek():
-    assert ("plustek", "Plustek (USB)") in registry.backend_choices()
+    assert ("plustek", "pyOpticfilm (Plustek)") in registry.backend_choices()
 
 
 def test_backend_choices_sane_only_off_windows():
@@ -41,7 +41,7 @@ def test_create_backend_falls_back_from_sane_on_windows(monkeypatch):
     monkeypatch.setattr(
         registry,
         "BACKENDS",
-        {"plustek": ("Plustek (USB)", lambda: sentinel)},
+        {"plustek": ("pyOpticfilm (Plustek)", lambda: sentinel)},
     )
     assert registry.create_backend("sane") is sentinel
 
