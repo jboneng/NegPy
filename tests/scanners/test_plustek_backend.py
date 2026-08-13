@@ -213,7 +213,7 @@ def test_scan_returns_well_formed_result(monkeypatch):
     _patch_enum(monkeypatch)
     scanner = _fake_scanner(progress_steps=2)
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
-    result = PlustekBackend().scan(_DEVICE_ID, _params(), lambda _: None, threading.Event())
+    result = PlustekBackend().scan(_DEVICE_ID, _params(), lambda *_: None, threading.Event())
     assert isinstance(result, ScanResult)
     assert result.rgb.ndim == 3 and result.rgb.shape[2] == 3
     assert result.dpi == 1800
@@ -227,7 +227,7 @@ def test_scan_honours_pre_set_cancel(monkeypatch):
     cancel = threading.Event()
     cancel.set()
     with pytest.raises(Exception, match="[Cc]ancel"):
-        PlustekBackend().scan(_DEVICE_ID, _params(), lambda _: None, cancel)
+        PlustekBackend().scan(_DEVICE_ID, _params(), lambda *_: None, cancel)
 
 
 def test_progress_stays_within_unit_range(monkeypatch):
@@ -235,7 +235,12 @@ def test_progress_stays_within_unit_range(monkeypatch):
     scanner = _fake_scanner(progress_steps=4)
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
     seen: list[float] = []
-    PlustekBackend().scan(_DEVICE_ID, _params(), seen.append, threading.Event())
+    PlustekBackend().scan(
+        _DEVICE_ID,
+        _params(),
+        lambda fraction, phase="Scanning": seen.append(fraction),
+        threading.Event(),
+    )
     assert seen
     assert all(0.0 <= v <= 1.0 for v in seen)
 
@@ -245,7 +250,7 @@ def test_transport_glitches_are_typed_transient(monkeypatch):
     scanner = _fake_scanner(scan_error=UsbError("Error during device I/O"))
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
     with pytest.raises(TransientScanError):
-        PlustekBackend().scan(_DEVICE_ID, _params(), lambda _: None, threading.Event())
+        PlustekBackend().scan(_DEVICE_ID, _params(), lambda *_: None, threading.Event())
 
 
 def test_real_errors_are_not_transient(monkeypatch):
@@ -256,7 +261,7 @@ def test_real_errors_are_not_transient(monkeypatch):
         PlustekBackend().scan(
             _DEVICE_ID,
             _params(frame=3),
-            lambda _: None,
+            lambda *_: None,
             threading.Event(),
         )
     assert not isinstance(excinfo.value, TransientScanError)
@@ -270,7 +275,7 @@ def test_capture_ir_returns_ir_plane(monkeypatch):
     result = PlustekBackend().scan(
         _DEVICE_ID,
         _params(capture_ir=True),
-        lambda _: None,
+        lambda *_: None,
         threading.Event(),
     )
     assert result.ir is not None
@@ -293,7 +298,7 @@ def test_scan_ensures_colour_calib_before_scan(monkeypatch):
 
     scanner.scan.side_effect = scan_tracked
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
-    PlustekBackend().scan(_DEVICE_ID, _params(), lambda _: None, threading.Event())
+    PlustekBackend().scan(_DEVICE_ID, _params(), lambda *_: None, threading.Event())
     assert order[0] == "ensure"
     assert "scan" in order
 
@@ -305,7 +310,7 @@ def test_scan_skips_calib_when_asic_already_ready(monkeypatch):
     scanner.calibrator.find_for_scan.return_value = entry
     scanner.asic.asic_shading_ready = True
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
-    PlustekBackend().scan(_DEVICE_ID, _params(), lambda _: None, threading.Event())
+    PlustekBackend().scan(_DEVICE_ID, _params(), lambda *_: None, threading.Event())
     scanner.calibrator.ensure_colour_asic_shading.assert_not_called()
 
 
@@ -314,7 +319,7 @@ def test_default_se_scan_passes_preview_safe_geometry(monkeypatch):
     _patch_enum(monkeypatch)
     scanner = _fake_scanner()
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", _FakeOpen(scanner))
-    PlustekBackend().scan(_DEVICE_ID, _params(dpi=1200), lambda _: None, threading.Event())
+    PlustekBackend().scan(_DEVICE_ID, _params(dpi=1200), lambda *_: None, threading.Event())
     assert scanner.scan.call_count >= 1
     kwargs = scanner.scan.call_args.kwargs
     assert kwargs.get("geometry") is not None
@@ -333,7 +338,7 @@ def test_explicit_window_uses_crop_geometry(monkeypatch):
     PlustekBackend().scan(
         _DEVICE_ID,
         _params(dpi=1200, window=window),
-        lambda _: None,
+        lambda *_: None,
         threading.Event(),
     )
     kwargs = scanner.scan.call_args.kwargs
@@ -366,7 +371,7 @@ def test_session_scans_on_held_handle(monkeypatch):
     monkeypatch.setattr(f"{_BACKEND}.Scanner.open", lambda *a, **k: scanner)
     backend = PlustekBackend()
     with backend.open_session(_DEVICE_ID) as session:
-        result = session.scan(_params(), lambda _: None, threading.Event())
+        result = session.scan(_params(), lambda *_: None, threading.Event())
     assert isinstance(result, ScanResult)
     scanner.close.assert_called()
 
@@ -389,6 +394,6 @@ def test_backend_scan_refuses_while_session_held(monkeypatch):
     session = backend.open_session(_DEVICE_ID)
     try:
         with pytest.raises(RuntimeError, match="held"):
-            backend.scan(_DEVICE_ID, _params(), lambda _: None, threading.Event())
+            backend.scan(_DEVICE_ID, _params(), lambda *_: None, threading.Event())
     finally:
         session.close()

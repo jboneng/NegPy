@@ -14,6 +14,7 @@ import numpy as np
 from negpy.infrastructure.scanners.base import (
     ScannerCapabilities,
     ScannerDevice,
+    ScannerSession,
     ScannerUnavailable,
     TransientScanError,
 )
@@ -68,11 +69,15 @@ def _to_scanner_device(info: UsbDeviceInfo) -> ScannerDevice:
     )
 
 
-def _safe_progress(progress: Callable[[float], None] | None, value: float) -> None:
+def _safe_progress(
+    progress: Callable[[float, str], None] | None,
+    value: float,
+    phase: str = "Scanning",
+) -> None:
     if progress is None:
         return
     with suppress(Exception):
-        progress(max(0.0, min(1.0, float(value))))
+        progress(max(0.0, min(1.0, float(value))), phase)
 
 
 def _validate_params(params: ScanParams, *, model: Any | None = None) -> None:
@@ -118,7 +123,7 @@ class PlustekSession:
     def scan(
         self,
         params: ScanParams,
-        progress: Callable[[float], None],
+        progress: Callable[[float, str], None],
         cancel: threading.Event,
     ) -> ScanResult:
         if self._closed:
@@ -174,7 +179,7 @@ class PlustekBackend:
     def refresh_devices(self) -> list[ScannerDevice]:
         return self.list_devices()
 
-    def open_session(self, device_id: str) -> PlustekSession:
+    def open_session(self, device_id: str) -> ScannerSession:
         if device_id in self._sessions:
             raise RuntimeError(f"Device already held in a session: {device_id}")
         self._ensure_known_device(device_id)
@@ -202,7 +207,7 @@ class PlustekBackend:
         self,
         device_id: str,
         params: ScanParams,
-        progress: Callable[[float], None],
+        progress: Callable[[float, str], None],
         cancel: threading.Event,
     ) -> ScanResult:
         if device_id in self._sessions:
@@ -243,7 +248,7 @@ class PlustekBackend:
         self,
         scanner: Scanner,
         params: ScanParams,
-        progress: Callable[[float], None],
+        progress: Callable[[float, str], None],
         cancel: threading.Event,
     ) -> ScanResult:
         if not model_is_scan_ready(scanner.model):
@@ -317,7 +322,7 @@ class PlustekBackend:
         dpi: int,
         window: tuple[float, float, float, float] | None,
         geometry: object | None,
-        progress: Callable[[float], None],
+        progress: Callable[[float, str], None],
         cancel: threading.Event,
     ) -> None:
         """Home ASIC shading before the colour feed (apply cache or measure).
@@ -327,7 +332,7 @@ class PlustekBackend:
         """
         if cancel.is_set():
             raise RuntimeError("Scan cancelled before start")
-        _safe_progress(progress, 0.02)
+        _safe_progress(progress, 0.02, "Calibrating")
         from pyopticfilm.exceptions import CalibrationError
         from pyopticfilm.scan.geometry import ScanGeometry
 
@@ -345,14 +350,14 @@ class PlustekBackend:
             if is_opticfilm_8200i_se(scanner.model):
                 geo, _ = bringup_scan_geometry(scanner.model, dpi, profile="preview_safe")
         if geo is None:
-            _safe_progress(progress, 0.1)
+            _safe_progress(progress, 0.1, "Calibrating")
             return
 
         asic = scanner.asic
         calibrator = scanner.calibrator
         hit = calibrator.find_for_scan(method="transparency", geometry=geo)
         if hit is not None and hit.has_asic_blob and getattr(asic, "asic_shading_ready", False):
-            _safe_progress(progress, 0.1)
+            _safe_progress(progress, 0.1, "Calibrating")
             return
 
         logger.info("Ensuring colour ASIC shading for dpi=%d", dpi)
@@ -370,7 +375,7 @@ class PlustekBackend:
             raise RuntimeError(str(exc)) from exc
         if cancel.is_set():
             raise RuntimeError("Scan cancelled")
-        _safe_progress(progress, 0.1)
+        _safe_progress(progress, 0.1, "Calibrating")
 
     @staticmethod
     def _default_scan_geometry(
@@ -401,7 +406,7 @@ class PlustekBackend:
         dpi: int,
         window: tuple[float, float, float, float] | None,
         geometry: object | None,
-        progress: Callable[[float], None],
+        progress: Callable[[float, str], None],
         cancel: threading.Event,
         progress_start: float = 0.0,
     ) -> tuple[Any, np.ndarray]:
@@ -411,7 +416,7 @@ class PlustekBackend:
             _safe_progress(progress, progress_start + 0.5 * span * p)
 
         def ir_progress(p: float) -> None:
-            _safe_progress(progress, progress_start + 0.5 * span * (1.0 + p))
+            _safe_progress(progress, progress_start + 0.5 * span * (1.0 + p), "Infrared")
 
         if cancel.is_set():
             raise RuntimeError("Scan cancelled before start")
