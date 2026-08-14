@@ -163,9 +163,9 @@ class TestAppController(unittest.TestCase):
             patch("negpy.desktop.controller.load_or_promote", return_value=None),
             patch("negpy.desktop.controller.write_sidecar") as mock_write,
         ):
-            written = self.controller._write_edit_sidecars([frame])
+            written, failed = self.controller._write_edit_sidecars([frame])
 
-        self.assertEqual(written, 1)
+        self.assertEqual((written, failed), (1, 0))
         self.mock_session_manager.config_for_asset.assert_called_once_with(frame)
         params = mock_write.call_args.args[1]
         self.assertIs(params, hydrated)
@@ -175,18 +175,20 @@ class TestAppController(unittest.TestCase):
         state = self.mock_session_manager.state
         state.config = replace(
             state.config,
-            process=replace(state.config.process, use_luma_average=True, use_colour_average=True, roll_name="PORTRA-04"),
+            process=replace(state.config.process, use_luma_average=True, use_color_average=True, roll_name="PORTRA-04"),
         )
 
         self.controller.clear_roll_baseline()
 
         cfg = self.mock_session_manager.update_config.call_args.args[0]
         self.assertFalse(cfg.process.use_luma_average)
-        self.assertFalse(cfg.process.use_colour_average)
+        self.assertFalse(cfg.process.use_color_average)
         self.assertIsNone(cfg.process.roll_name)
 
     def test_thumbnail_miss_marks_file_unreadable(self):
         from PIL import Image
+
+        from negpy.services.assets.thumbnails import asset_thumbnail_key
 
         self.mock_session_manager.asset_model = MagicMock()
         state = self.mock_session_manager.state
@@ -194,9 +196,10 @@ class TestAppController(unittest.TestCase):
             {"name": "bad.dng", "path": "/tmp/bad.dng", "hash": "h1"},
             {"name": "good.dng", "path": "/tmp/good.dng", "hash": "h2"},
         ]
-        self.controller._thumb_requested = ["h1", "h2"]
+        keys = [asset_thumbnail_key(f) for f in state.uploaded_files]
+        self.controller._thumb_requested = keys
 
-        self.controller._on_thumbnails_finished({"h2": Image.new("RGB", (4, 4))})
+        self.controller._on_thumbnails_finished({keys[1]: Image.new("RGB", (4, 4))})
 
         self.assertIn("decode_failed", state.uploaded_files[0])
         self.assertNotIn("decode_failed", state.uploaded_files[1])
@@ -266,7 +269,10 @@ class TestAppController(unittest.TestCase):
         self.controller.thumbnail_update_requested.connect(lambda task: captured.setdefault("task", task))
         self.controller._update_thumbnail_from_state(persist=False)
 
-        self.assertEqual(captured["task"].file_hash, "h1-rgb")
+        from negpy.services.assets.thumbnails import thumbnail_cache_key
+
+        self.assertEqual(captured["task"].file_hash, thumbnail_cache_key("h1", is_triplet=True))
+        self.assertNotEqual(captured["task"].file_hash, thumbnail_cache_key("h1", is_triplet=False))
 
     def test_capture_worker_cancelled_is_forwarded(self):
         cancelled = MagicMock()
@@ -556,7 +562,7 @@ class TestAppController(unittest.TestCase):
     def test_set_crop_ratio_preserves_metering_bounds(self):
         """A ratio change is a pure reframe and must not re-meter. Clearing the
         per-file bounds makes the next render re-analyze over the new (smaller) ROI,
-        which lands on different per-channel floors/ceils — a visible colour cast
+        which lands on different per-channel floors/ceils — a visible color cast
         shift on the canvas from an operation that only changed the frame."""
         import numpy as np
 
@@ -1129,14 +1135,13 @@ class TestLinearOutputExportCurrentFile(unittest.TestCase):
         gc.collect()
 
     def test_current_file_triplet_survives_linear_export(self):
-        with (
-            patch("negpy.services.export.linear_output.is_linear_output_supported", return_value=True),
-            patch("negpy.services.export.linear_output.export_linear_output") as mock_export,
-        ):
-            self.controller.request_linear_output_export()
+        # The write itself now runs in the export worker, so the triplet has to survive
+        # into the dispatched task rather than into a direct call.
+        files = [f for f in self.controller.state.uploaded_files]
+        tasks = self.controller._linear_output_tasks(files, "/tmp/out")
 
-        mock_export.assert_called_once()
-        rgbscan = mock_export.call_args.kwargs["rgbscan"]
+        self.assertEqual(len(tasks), 1)
+        rgbscan = tasks[0].options["rgbscan"]
         self.assertTrue(rgbscan.enabled)
         self.assertEqual(rgbscan.green_path, "/tmp/IMG_0001_G.cr2")
         self.assertEqual(rgbscan.blue_path, "/tmp/IMG_0001_B.cr2")

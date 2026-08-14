@@ -4,6 +4,8 @@ Summary of available keyboard shortcuts in NegPy.
 
 All shortcuts, including slider adjustments, can be changed in-app from the `?` shortcut overlay via `Customize`. Slider shortcuts are shown as merged rows (e.g. **Density ↑/↓**) with a customizable **Step** column — defaults match the built-in keyboard increments below.
 
+A slider shortcut reports its new value in the canvas HUD, so you can keep a control on a hidden tab and still read what you just set.
+
 Numpad keys can be bound separately from the number row (e.g. `Num+9` vs `9`). Num Lock must be on for numpad digits to register.
 
 ## Navigation
@@ -38,7 +40,7 @@ Numpad keys can be bound separately from the number row (e.g. `Num+9` vs `9`). N
 | `Shift + B` | Toggle Dodge & Burn Mask Draw |
 | `Shift + R` | Toggle Analysis Region Draw |
 | `Shift + T` | Print the density × grade test strip |
-| `Shift + F` | Print the colour ring-around (M/Y filtration) |
+| `Shift + F` | Print the color ring-around (M/Y filtration) |
 | `\|` | Peek flat scan (digital intermediate preview) |
 | `Esc` | First press clears in-progress points, second puts the tool down |
 

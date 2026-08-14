@@ -22,7 +22,7 @@ from negpy.desktop.session import (
     resolve_asset_rgbscan,
     resolve_asset_stitch,
 )
-from negpy.desktop.workers.export import ExportTask, ExportWorker, find_export_conflicts
+from negpy.desktop.workers.export import ExportTask, ExportWorker, LinearOutputTask, find_export_conflicts
 from negpy.desktop.workers.render import (
     AssetDiscoveryTask,
     AssetDiscoveryWorker,
@@ -96,6 +96,7 @@ from negpy.kernel.system.paths import get_resource_path
 from negpy.features.retouch.logic import downsample_ir, trace_scratch
 from negpy.features.retouch.models import RetouchConfig
 from negpy.features.toning.models import ToningConfig
+from negpy.infrastructure.capture.settings import WhiteCaptureMode
 from negpy.infrastructure.display.color_spaces import ColorSpaceRegistry
 from negpy.infrastructure.filesystem.watcher import FolderWatchService
 from negpy.infrastructure.gpu.device import GPUDevice
@@ -1292,7 +1293,7 @@ class AppController(QObject):
         Rotation is not in the key: an entry holds all four orientations.
         """
         exposure = self.state.config.exposure
-        if kind == "colour":
+        if kind == "color":
             exposure = replace(exposure, wb_magenta=0.0, wb_yellow=0.0)
         else:
             exposure = replace(exposure, density=1.0, grade=115.0)
@@ -1904,11 +1905,11 @@ class AppController(QObject):
         self.zone_pins_changed.emit()
 
     def toggle_ring_around(self, force: Optional[bool] = None) -> None:
-        """Print (or clear) the colour ring-around — the M/Y filtration proof."""
-        self.toggle_test_strip(force, kind="colour")
+        """Print (or clear) the color ring-around — the M/Y filtration proof."""
+        self.toggle_test_strip(force, kind="color")
 
     def toggle_test_strip(self, force: Optional[bool] = None, kind: str = "tone") -> None:
-        """Print (or clear) a proof mosaic: the density × grade strip, or the colour ring-around.
+        """Print (or clear) a proof mosaic: the density × grade strip, or the color ring-around.
         Entering dispatches one job, since these need pixels the canvas doesn't have.
 
         Both share the one proof slot, so asking for the other kind swaps it.
@@ -1922,9 +1923,9 @@ class AppController(QObject):
             return
 
         # Unrotated: one print yields every orientation, so rotating never re-renders.
-        grid = RING_GRID if kind == "colour" else STRIP_GRID
-        overrides = ring_overrides() if kind == "colour" else strip_overrides()
-        toast = "Printing the colour ring-around…" if kind == "colour" else "Printing test strip…"
+        grid = RING_GRID if kind == "color" else STRIP_GRID
+        overrides = ring_overrides() if kind == "color" else strip_overrides()
+        toast = "Printing the color ring-around…" if kind == "color" else "Printing test strip…"
 
         # Reprinting an unchanged proof is a pile of renders for pixels we already have.
         cached = self._strip_memo.get(self.state.current_file_hash or "", self._strip_memo_key(kind))
@@ -1995,7 +1996,7 @@ class AppController(QObject):
         self.state.test_strip_mosaic = mosaics[self.state.test_strip_rotation]
         self.state.test_strip_content_rect = content_rect
         self.test_strip_changed.emit(True)
-        label = "Ring-around" if self.state.test_strip_kind == "colour" else "Test strip"
+        label = "Ring-around" if self.state.test_strip_kind == "color" else "Test strip"
         self.status_message_requested.emit(f"{label} ready — click a patch to keep it", 4000)
 
     def rotate_test_strip(self, direction: int) -> bool:
@@ -2027,12 +2028,12 @@ class AppController(QObject):
         if not self.state.test_strip:
             return
         exposure = self.state.config.exposure
-        colour = self.state.test_strip_kind == "colour"
-        base_grid = RING_GRID if colour else STRIP_GRID
+        color = self.state.test_strip_kind == "color"
+        base_grid = RING_GRID if color else STRIP_GRID
         rotation = self.state.test_strip_rotation
-        cells = rotate_grid(ring_cells() if colour else strip_cells(), base_grid, rotation)
+        cells = rotate_grid(ring_cells() if color else strip_cells(), base_grid, rotation)
         _, _, first, second = cells[row * proof_grid(base_grid, rotation)[1] + col]
-        if colour:
+        if color:
             new_exposure = replace(exposure, wb_magenta=first, wb_yellow=second)
         else:
             new_exposure = replace(exposure, density=first, grade=second)
@@ -2117,7 +2118,7 @@ class AppController(QObject):
         _enforce_ratio_by_occupancy only ever shrink the box inside a footprint
         that already excludes the rebate, so the new ROI is a subset of the old
         one. Re-metering there can only drift the per-channel floors/ceils — i.e.
-        a visible colour shift from what is supposed to be a pure reframe."""
+        a visible color shift from what is supposed to be a pure reframe."""
         geom = self.state.config.geometry
         if ratio == geom.autocrop_ratio:
             return
@@ -2830,7 +2831,7 @@ class AppController(QObject):
             new_process = replace(
                 p.process,
                 use_luma_average=True,
-                use_colour_average=True,
+                use_color_average=True,
                 locked_floors=locked_floors,
                 locked_ceils=locked_ceils,
                 roll_name=None,
@@ -2845,7 +2846,7 @@ class AppController(QObject):
         new_process = replace(
             self.state.config.process,
             use_luma_average=True,
-            use_colour_average=True,
+            use_color_average=True,
             locked_floors=locked_floors,
             locked_ceils=locked_ceils,
             roll_name=None,
@@ -2881,7 +2882,7 @@ class AppController(QObject):
                 new_process = replace(
                     p.process,
                     use_luma_average=True,
-                    use_colour_average=True,
+                    use_color_average=True,
                     locked_floors=locked_floors,
                     locked_ceils=locked_ceils,
                     roll_name=name,
@@ -2894,7 +2895,7 @@ class AppController(QObject):
             new_process = replace(
                 self.state.config.process,
                 use_luma_average=True,
-                use_colour_average=True,
+                use_color_average=True,
                 locked_floors=locked_floors,
                 locked_ceils=locked_ceils,
                 roll_name=name,
@@ -2909,7 +2910,7 @@ class AppController(QObject):
         new_process = replace(
             self.state.config.process,
             use_luma_average=False,
-            use_colour_average=False,
+            use_color_average=False,
             roll_name=None,
             **invalidate_local_bounds(self.state.config.process),
         )
@@ -3381,9 +3382,9 @@ class AppController(QObject):
         self.session.repo.save_global_setting("rgbscan_mode", rgb and not white)
         capture_roll = getattr(req, "roll_name", "") if req is not None else ""
         capture_frame = getattr(req, "frame_number", None) if req is not None else None
-        if white:  # slides/B&W force a positive process
-            mode = (req.white_process_mode or "auto").lower()
-            target = {"e-6": ProcessMode.E6, "b&w": ProcessMode.BW}.get(mode)
+        if white:  # slides / B&W negatives force a positive process
+            mode = WhiteCaptureMode(req.white_process_mode)
+            target = {WhiteCaptureMode.E6: ProcessMode.E6, WhiteCaptureMode.BW: ProcessMode.BW}.get(mode)
             self._pending_capture_imports[_capture_import_key(paths[0])] = _PendingCaptureImport(
                 process_mode=target,
                 detect_mode=target is None,
@@ -3435,7 +3436,7 @@ class AppController(QObject):
 
         Single source of truth for every consumer of a rendered buffer — the canvas
         shader, the CPU overlay and the filmstrip thumbnail must agree, or the same
-        frame shows two different colours. Renders arrive in the working space; a
+        frame shows two different colors. Renders arrive in the working space; a
         proof is *not* baked into them, it is folded into the display LUT here (see
         ``get_display_lut``), which is what lets a GPU texture go to the shader
         untouched. ``splash`` marks the embedded camera thumbnail, already sRGB.
@@ -3845,7 +3846,10 @@ class AppController(QObject):
 
     def request_linear_output_export(self, files: list[dict] | None = None) -> None:
         """Export decoded linear buffers as untagged 16-bit TIFFs to the export folder."""
-        from negpy.services.export.linear_output import export_linear_output, is_linear_output_supported
+        from negpy.services.export.linear_output import is_linear_output_supported
+
+        if self._batch_busy("export"):
+            return
 
         export_path = self._ensure_valid_export_path()
         if not export_path:
@@ -3878,10 +3882,26 @@ class AppController(QObject):
         if len(supported) > 1 and not self._confirm_bulk_export(f"Linear-export {count_of(len(supported), 'frame')}?"):
             return
 
-        exported = 0
+        tasks = self._linear_output_tasks(supported, export_path)
+
+        self._export_start_time = time.time()
+        self._export_failures = 0
+        if self._begin_batch("export", "Exporting Linear Output", abortable=True) is None:
+            return
+        QMetaObject.invokeMethod(
+            self.export_worker,
+            "run_linear_output",
+            Qt.ConnectionType.QueuedConnection,
+            Q_ARG(list, tasks),
+        )
+
+    def _linear_output_tasks(self, supported: list[dict], export_path: str) -> list[LinearOutputTask]:
+        """Resolve each frame's config and destination on the UI thread; the worker only writes."""
         expansion = self.state.linear_expansion
         linear_fmt = self.state.linear_format
         out_ext = "jxl" if linear_fmt == "jxl" else "tiff"
+        taken: set[str] = set()
+        tasks = []
         for f in supported:
             params = self._batch_params_for(f)
             stitch = params.stitch if params.stitch.stitch_enabled else None
@@ -3891,36 +3911,36 @@ class AppController(QObject):
             stem = f"{hdr_stem(frames)}-HDR" if frames else os.path.splitext(os.path.basename(f["path"]))[0]
             out_path = os.path.join(export_path, f"{stem}_linear.{out_ext}")
             counter = 2
-            while os.path.exists(out_path):
+            # `taken` as well as the disk: the whole batch is named up front now, before
+            # the worker has written any of it, so same-stem frames would collide.
+            while out_path in taken or os.path.exists(out_path):
                 out_path = os.path.join(export_path, f"{stem}_linear_{counter}.{out_ext}")
                 counter += 1
-            try:
-                export_linear_output(
-                    f["path"],
-                    out_path,
-                    geometry=params.geometry,
-                    expansion=expansion,
-                    rgbscan=params.rgbscan,
-                    stitch=stitch,
-                    hdr=params.hdr,
-                    flatfield=params.flatfield,
-                    process=params.process,
-                    apply_wb=self.state.linear_apply_wb,
-                    apply_flatfield=self.state.linear_apply_flatfield,
-                    apply_sensor=self.state.linear_apply_sensor,
-                    apply_ice=self.state.linear_apply_ice,
-                    retouch=params.retouch,
-                    gamma_key=self.state.linear_gamma_key,
-                    output_format=linear_fmt,
-                    jxl_effort=self.state.linear_jxl_effort,
+            taken.add(out_path)
+            tasks.append(
+                LinearOutputTask(
+                    file_info=f,
+                    out_path=out_path,
+                    options={
+                        "geometry": params.geometry,
+                        "expansion": expansion,
+                        "rgbscan": params.rgbscan,
+                        "stitch": stitch,
+                        "hdr": params.hdr,
+                        "flatfield": params.flatfield,
+                        "process": params.process,
+                        "apply_wb": self.state.linear_apply_wb,
+                        "apply_flatfield": self.state.linear_apply_flatfield,
+                        "apply_sensor": self.state.linear_apply_sensor,
+                        "apply_ice": self.state.linear_apply_ice,
+                        "retouch": params.retouch,
+                        "gamma_key": self.state.linear_gamma_key,
+                        "output_format": linear_fmt,
+                        "jxl_effort": self.state.linear_jxl_effort,
+                    },
                 )
-                exported += 1
-            except Exception as e:
-                logger.warning("Linear output failed for %s: %s", f.get("name"), e)
-                self.set_status(f"Linear Output failed: {os.path.basename(f['path'])}: {e}", 4000)
-
-        if exported:
-            self.set_status(f"Linear Output: exported {count_of(exported, 'file')}", 4000)
+            )
+        return tasks
 
     def request_export(self) -> None:
         """Exports the current file using the settings currently shown in the Export panel."""
@@ -4240,10 +4260,13 @@ class AppController(QObject):
             Q_ARG(str, cs.contact_sheet_label_color),
         )
 
-    def _write_edit_sidecars(self, files: list[dict]) -> int:
-        """Write a .negpy edit sidecar next to each source (each frame's own saved edits). Returns count written."""
+    def _write_edit_sidecars(self, files: list[dict]) -> tuple[int, int]:
+        """Write a .negpy edit sidecar next to each source (each frame's own saved edits).
+        Returns (written, failed) — a caller that reports only the written count turns a
+        read-only source folder into a silent success."""
         repo = self.session.repo
         written = 0
+        failed = 0
         for f in files:
             half = int(f.get("half") or 0)
             params = load_or_promote(
@@ -4253,8 +4276,9 @@ class AppController(QObject):
                 write_sidecar(f["path"], params, half=half)
                 written += 1
             except Exception as exc:
+                failed += 1
                 logger.warning("Sidecar write failed for %s: %s", f.get("path"), exc)
-        return written
+        return written, failed
 
     def export_edit_sidecars(self) -> None:
         """Explicit batch sidecar export for all visible files (ignores the on-export toggle)."""
@@ -4265,18 +4289,19 @@ class AppController(QObject):
         ]
         if not visible_files:
             return
-        written = self._write_edit_sidecars(visible_files)
-        self.set_status(f"Wrote {count_of(written, 'edit sidecar')}", 4000)
+        written, failed = self._write_edit_sidecars(visible_files)
+        suffix = f" — {failed} failed" if failed else ""
+        self.set_status(f"Wrote {count_of(written, 'edit sidecar')}{suffix}", 6000 if failed else 4000)
 
     def _run_export_tasks(self, tasks: List[ExportTask]) -> None:
-        # Reject unencodable format/colour-space pairings before anything else.
+        # Reject unencodable format/color-space pairings before anything else.
         blocked = [t for t in tasks if export_blocked(t.export_settings.export_fmt, t.export_settings.export_color_space)]
         if blocked:
             names = ", ".join(sorted({t.file_info.get("name", "?") for t in blocked})[:5])
             QMessageBox.warning(
                 None,
                 "Export",
-                f"JPEG XL can't tag the selected colour space ({names}).\n"
+                f"JPEG XL can't tag the selected color space ({names}).\n"
                 "Choose sRGB, P3 D65, Rec 2020 or Greyscale, or a different format.",
             )
             return
@@ -4466,7 +4491,7 @@ class AppController(QObject):
         # base stacks edits. Skip only when both axes ride the roll baseline.
         proc = self.state.config.process
         bounds = metrics.get("log_bounds_base") or metrics.get("log_bounds")
-        if bounds and not (proc.use_luma_average and proc.use_colour_average):
+        if bounds and not (proc.use_luma_average and proc.use_color_average):
             changes = {}
             if not proc.lock_bounds and (bounds.floors != proc.local_floors or bounds.ceils != proc.local_ceils):
                 changes["local_floors"] = bounds.floors
@@ -4562,7 +4587,7 @@ class AppController(QObject):
             return
 
         # Same transform the canvas used for this buffer, so the filmstrip and the
-        # canvas can't disagree about the frame's colour.
+        # canvas can't disagree about the frame's color.
         display_cs, monitor_bytes, proof = self.display_transform_params(splash=bool(metrics.get("splash")))
         # The asset's own key, so the batch (source) path re-serves this rendered positive
         # instead of the uninverted source merge it would decode itself.

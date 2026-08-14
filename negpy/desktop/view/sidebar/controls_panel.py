@@ -18,6 +18,7 @@ from negpy.features.toning.models import ToningConfig
 from negpy.features.geometry.models import GeometryConfig
 from negpy.features.process.models import ProcessConfig
 from negpy.features.finish.models import FinishConfig
+from negpy.features.flatfield.models import FlatFieldConfig
 
 # Sidebar Components
 from negpy.desktop.view.sidebar.presets import PresetsSidebar
@@ -25,7 +26,7 @@ from negpy.desktop.view.sidebar.flatfield import FlatFieldSidebar
 from negpy.desktop.view.sidebar.process import ProcessSidebar
 from negpy.desktop.view.sidebar.roll import RollAnalysisSidebar
 from negpy.desktop.view.sidebar.sensor import SensorSidebar
-from negpy.desktop.view.sidebar.colour import ColourSidebar
+from negpy.desktop.view.sidebar.color import ColorSidebar
 from negpy.desktop.view.sidebar.tone import ToneSidebar
 from negpy.desktop.view.sidebar.geometry import GeometrySidebar
 from negpy.desktop.view.sidebar.lab import LabSidebar
@@ -37,7 +38,7 @@ from negpy.desktop.view.sidebar.finish import FinishSidebar
 
 # Exposure field partitions — the Filtration and Tone sections split ExposureConfig; used for both
 # per-section modified counts and scoped resets. render_intent is in neither (flat-master output).
-_COLOUR_FIELDS = (
+_COLOR_FIELDS = (
     "wb_cyan",
     "wb_magenta",
     "wb_yellow",
@@ -105,6 +106,7 @@ _DEFAULT_ALTPROC = AltProcessConfig()
 _DEFAULT_GEOMETRY = GeometryConfig()
 _DEFAULT_PROCESS = ProcessConfig()
 _DEFAULT_FINISH = FinishConfig()
+_DEFAULT_FLATFIELD = FlatFieldConfig()
 
 
 class ControlsPanel(QWidget):
@@ -175,16 +177,16 @@ class ControlsPanel(QWidget):
             icon=qta.icon("mdi6.film", color=icon_color),
         )
 
-        self.colour_sidebar = ColourSidebar(self.controller)
-        self.colour_histogram = MiniRGBHistogramWidget()
-        # "Filtration", not "Colour" — that names the Lab & Toning tab; the persisted
-        # "colour" section key stays.
-        self.colour_section = self._make_section(
+        self.color_sidebar = ColorSidebar(self.controller)
+        self.color_histogram = MiniRGBHistogramWidget()
+        # "Filtration", not "Color" — that names the Lab & Toning tab; the persisted
+        # "color" section key stays.
+        self.color_section = self._make_section(
             "Filtration",
-            "colour",
-            self.colour_sidebar,
+            "color",
+            self.color_sidebar,
             icon=qta.icon("fa5s.palette", color=icon_color),
-            background_widget=self.colour_histogram,
+            background_widget=self.color_histogram,
         )
 
         self.tone_sidebar = ToneSidebar(self.controller)
@@ -265,8 +267,8 @@ class ControlsPanel(QWidget):
                 "tone",
                 "fa5s.sun",
                 "Exposure — Filtration, Tone, Dodge & Burn",
-                [self.colour_section, self.tone_section, self.local_section],
-                ["colour_section", "tone_section", "local_section"],
+                [self.color_section, self.tone_section, self.local_section],
+                ["color_section", "tone_section", "local_section"],
             ),
             (
                 "color",
@@ -318,7 +320,7 @@ class ControlsPanel(QWidget):
             is_expanded = bool(persisted)
         else:
             is_expanded = THEME.sidebar_expanded_defaults.get(key, False)
-            if key in ["process", "colour", "tone", "geometry", "lab", "retouch", "export", "analysis", "toning"]:
+            if key in ["process", "color", "tone", "geometry", "lab", "retouch", "export", "analysis", "toning"]:
                 is_expanded = THEME.sidebar_expanded_defaults.get(key, True)
 
         section = CollapsibleSection(title, expanded=is_expanded, icon=icon, background_widget=background_widget, info=has_guide(key))
@@ -342,7 +344,7 @@ class ControlsPanel(QWidget):
         # Histogram only changes on render completion — refresh there, not on every resync.
         self.controller.image_updated.connect(self._update_histogram)
 
-        self.colour_section.reset_requested.connect(lambda: self._reset_exposure_fields(_COLOUR_FIELDS))
+        self.color_section.reset_requested.connect(lambda: self._reset_exposure_fields(_COLOR_FIELDS))
         self.tone_section.reset_requested.connect(lambda: self._reset_exposure_fields(_TONE_FIELDS))
         self.lab_section.reset_requested.connect(lambda: self.controller.session.reset_section("lab"))
         self.altproc_section.reset_requested.connect(lambda: self.controller.session.reset_section("altproc"))
@@ -358,7 +360,7 @@ class ControlsPanel(QWidget):
         """Single source for every shortcut-bearing widget tooltip — re-run on each
         rebind to re-render the key chips. Don't set these locally in the sidebars:
         this pass overwrites them."""
-        col = self.colour_sidebar
+        col = self.color_sidebar
         exp = self.tone_sidebar
         geo = self.geometry_sidebar
         lab = self.lab_sidebar
@@ -376,7 +378,7 @@ class ControlsPanel(QWidget):
         )
         col.temp_slider.setToolTip(
             tooltip_with_shortcut(
-                "Colour temperature lever over the Global Magenta/Yellow white balance — moving it "
+                "Color temperature lever over the Global Magenta/Yellow white balance — moving it "
                 "steers M/Y along the warm-cool axis (tint preserved); moving M/Y updates the readout. "
                 "Mired-linear travel, warm right; Kelvin is nominal",
                 ["temp_warm", "temp_cool"],
@@ -522,7 +524,7 @@ class ControlsPanel(QWidget):
         )
         proc.color_range_clip_slider.setToolTip(
             tooltip_with_shortcut(
-                "Per-channel colour-balance clip percentile (orange-mask cast removal), independent of tonal range. "
+                "Per-channel color-balance clip percentile (orange-mask cast removal), independent of tonal range. "
                 "Neutral: P1 clip. Negative: gentler, samples nearer the extremes. Positive: tighter channel balance",
                 ["color_range_clip_inc", "color_range_clip_dec"],
             )
@@ -553,7 +555,7 @@ class ControlsPanel(QWidget):
         )
         lab.chroma_denoise_slider.setToolTip(
             tooltip_with_shortcut(
-                "Chroma denoise in Lab space — smooths colour noise while preserving luminance grain",
+                "Chroma denoise in Lab space — smooths color noise while preserving luminance grain",
                 ["chroma_denoise_inc", "chroma_denoise_dec"],
             )
         )
@@ -567,7 +569,7 @@ class ControlsPanel(QWidget):
             )
         )
         lab.skin_protection_slider.setToolTip(
-            "Holds skin-hued colour under a chroma ceiling so faces don't go sunburnt — hue and lightness "
+            "Holds skin-hued color under a chroma ceiling so faces don't go sunburnt — hue and lightness "
             "untouched, and chroma is only ever pulled down. Independent of Chroma: it also reins in skin "
             "that arrived over-saturated from the print curve. 0 = off, 1.0 = matte"
         )
@@ -575,7 +577,7 @@ class ControlsPanel(QWidget):
             tooltip_with_shortcut(
                 "Pushes the print's dye densities apart before decode, in the same matrix slot as the "
                 "paper's own dye crosstalk — so it responds to the paper profile and eases off where the "
-                "curve is already compressed at toe and shoulder. Chroma in Colour is the flat version: "
+                "curve is already compressed at toe and shoulder. Chroma in Color is the flat version: "
                 "an even a*/b* scale after decode. Takes per-layer R/G/B trims. 1.0 = off/identity",
                 ["dye_separation_inc", "dye_separation_dec"],
             )
@@ -583,9 +585,9 @@ class ControlsPanel(QWidget):
         exp.separation_damping_slider.setToolTip(
             tooltip_with_shortcut(
                 "Decides where Dye Separation's push lands instead of adding one of its own — at 0 every "
-                "colour gets the same push, at 1 muted colour takes it all while colour that is already "
-                "saturated gets the opposite, so a hard push adds colour where there was none instead of "
-                "flattening the strongest colours. Dead at Dye Separation 1.0. 0 = flat",
+                "color gets the same push, at 1 muted color takes it all while color that is already "
+                "saturated gets the opposite, so a hard push adds color where there was none instead of "
+                "flattening the strongest colors. Dead at Dye Separation 1.0. 0 = flat",
                 ["separation_damping_inc", "separation_damping_dec"],
             )
         )
@@ -597,7 +599,7 @@ class ControlsPanel(QWidget):
         )
         lab.sharpen_slider.setToolTip(
             tooltip_with_shortcut(
-                "L-channel unsharp mask with halo suppression — crisps detail without bright edge outlines or colour fringing",
+                "L-channel unsharp mask with halo suppression — crisps detail without bright edge outlines or color fringing",
                 ["sharpen_inc", "sharpen_dec"],
             )
         )
@@ -651,20 +653,20 @@ class ControlsPanel(QWidget):
 
         ton.selenium_slider.setToolTip(
             tooltip_with_shortcut(
-                "Simulates selenium toning — converts the densest silver first: deeper blacks, cool eggplant shadows. B&W mode only",
+                "Simulates selenium toning — converts the densest silver first: deeper blacks, cool eggplant shadows. B&W Negative mode only",
                 ["selenium_inc", "selenium_dec"],
             )
         )
         ton.sepia_slider.setToolTip(
             tooltip_with_shortcut(
                 "Simulates sepia bleach-redevelop toning — warms the highlights first while shadows hold; "
-                "partial strength gives the classic split-sepia look. B&W mode only",
+                "partial strength gives the classic split-sepia look. B&W Negative mode only",
                 ["sepia_inc", "sepia_dec"],
             )
         )
         ton.shadow_hue_slider.setToolTip(
             tooltip_with_shortcut(
-                "Hue of the shadow split-tone colour injection",
+                "Hue of the shadow split-tone color injection",
                 ["shadow_hue_inc", "shadow_hue_dec"],
             )
         )
@@ -676,7 +678,7 @@ class ControlsPanel(QWidget):
         )
         ton.highlight_hue_slider.setToolTip(
             tooltip_with_shortcut(
-                "Hue of the highlight split-tone colour injection",
+                "Hue of the highlight split-tone color injection",
                 ["highlight_hue_inc", "highlight_hue_dec"],
             )
         )
@@ -713,10 +715,10 @@ class ControlsPanel(QWidget):
         """Force all sidebar panels to update their widgets from current AppState."""
         from negpy.features.process.models import ProcessMode
 
-        self.colour_section.setVisible(self.controller.state.config.process.process_mode != ProcessMode.BW)
+        self.color_section.setVisible(self.controller.state.config.process.process_mode != ProcessMode.BW)
         self.process_sidebar.sync_ui()
         self.roll_sidebar.sync_ui()
-        self.colour_sidebar.sync_ui()
+        self.color_sidebar.sync_ui()
         self.tone_sidebar.sync_ui()
         self.geometry_sidebar.sync_ui()
         self.lab_sidebar.sync_ui()
@@ -737,7 +739,7 @@ class ControlsPanel(QWidget):
             return
         self._last_histogram_buf = buf
         self.tone_histogram.update_data(buf)
-        self.colour_histogram.update_data(buf)
+        self.color_histogram.update_data(buf)
 
     def _reset_exposure_fields(self, fields) -> None:
         """Reset only the given ExposureConfig fields to defaults (scoped section reset)."""
@@ -759,7 +761,7 @@ class ControlsPanel(QWidget):
         _proc = _DEFAULT_PROCESS
 
         exp = cfg.exposure
-        colour_count = sum(getattr(exp, f) != getattr(_exp, f) for f in _COLOUR_FIELDS)
+        color_count = sum(getattr(exp, f) != getattr(_exp, f) for f in _COLOR_FIELDS)
         tone_count = sum(getattr(exp, f) != getattr(_exp, f) for f in _TONE_FIELDS)
 
         lab = cfg.lab
@@ -840,6 +842,27 @@ class ControlsPanel(QWidget):
             ]
         )
 
+        # Calibration's four fields live on ProcessConfig but belong to their own section,
+        # so they are counted here and left out of process_count above.
+        sensor_count = sum(
+            [
+                proc.sensor_profile != _proc.sensor_profile,
+                proc.crosstalk_profile != _proc.crosstalk_profile,
+                proc.crosstalk_strength != _proc.crosstalk_strength,
+                proc.hue_trim != _proc.hue_trim,
+            ]
+        )
+
+        ff = cfg.flatfield
+        _ff = _DEFAULT_FLATFIELD
+        flatfield_count = sum(
+            [
+                ff.apply != _ff.apply,
+                ff.profile_id != _ff.profile_id,
+                ff.k1 != _ff.k1,
+            ]
+        )
+
         ret = cfg.retouch
         # Heal-tool clicks and scratch polylines both commit into manual_heal_strokes
         # (manual_dust_spots is the legacy list), so count them or the Finish tab's
@@ -867,12 +890,12 @@ class ControlsPanel(QWidget):
         roll_count = sum(
             [
                 bool(proc.use_luma_average),
-                bool(proc.use_colour_average),
+                bool(proc.use_color_average),
                 proc.roll_name is not None,
             ]
         )
 
-        self.colour_section.set_modified(colour_count)
+        self.color_section.set_modified(color_count)
         self.tone_section.set_modified(tone_count)
         self.lab_section.set_modified(lab_count)
         self.altproc_section.set_modified(altproc_count)
@@ -880,6 +903,9 @@ class ControlsPanel(QWidget):
         self.geometry_section.set_modified(geometry_count)
         self.process_section.set_modified(process_count)
         self.retouch_section.set_modified(retouch_count)
+        # Presets and the two Scan sections stay out: they own no WorkspaceConfig fields.
+        self.sensor_section.set_modified(sensor_count)
+        self.flatfield_section.set_modified(flatfield_count)
         self.local_section.set_modified(len(cfg.local.masks))
         self.finish_section.set_modified(finish_count)
         self.roll_section.set_modified(roll_count)
@@ -892,6 +918,6 @@ class ControlsPanel(QWidget):
         self.process_sidebar.sync_ui()
         # Retouch hosts two tool toggles (heal + scratch); without this sync,
         # activating one left the other highlighted as if both were live. The
-        # colour sidebar's WB picker had the same latent stale-check bug.
+        # color sidebar's WB picker had the same latent stale-check bug.
         self.retouch_sidebar.sync_ui()
-        self.colour_sidebar.sync_ui()
+        self.color_sidebar.sync_ui()
