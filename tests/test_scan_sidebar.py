@@ -417,9 +417,26 @@ def test_scan_error_resets_ui_and_shows_status(monkeypatch) -> None:
         return 0
 
     monkeypatch.setattr("negpy.desktop.view.sidebar.scan.QMessageBox.warning", _fake_warning)
-    sidebar._on_scan_error("OpticFilm 8100 cannot scan with pyOpticfilm")
+    sidebar._on_scan_error("USB I/O failed")
 
     assert sidebar._scanning is False
     assert sidebar.progress_bar.isVisible() is False
-    assert "Error: OpticFilm 8100 cannot scan with pyOpticfilm" in sidebar.status_label.text()
-    assert popped == [("Scan failed", "OpticFilm 8100 cannot scan with pyOpticfilm")]
+    assert "Error: USB I/O failed" in sidebar.status_label.text()
+    assert popped == []
+
+
+def test_lockout_scan_error_shows_message_box(monkeypatch) -> None:
+    sidebar, _ = _sidebar(SE_DEVICE)
+    popped: list[tuple[str, str]] = []
+
+    def _fake_warning(parent, title, text, *args, **kwargs):
+        del parent, args, kwargs
+        popped.append((title, text))
+        return 0
+
+    monkeypatch.setattr("negpy.desktop.view.sidebar.scan.QMessageBox.warning", _fake_warning)
+    msg = "OpticFilm 8100 (GL845) cannot scan with pyOpticfilm in this release — only OpticFilm 8200i SE is validated."
+    sidebar._on_scan_error(msg)
+
+    assert f"Error: {msg}" in sidebar.status_label.text()
+    assert popped == [("Scan failed", msg)]

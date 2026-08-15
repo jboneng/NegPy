@@ -812,7 +812,9 @@ class ScanSidebar(QWidget):
         self.progress_bar.setVisible(False)
         text = msg or "Unknown scan error"
         self.status_label.setText(f"Error: {text}")
-        QMessageBox.warning(self, "Scan failed", text)
+        # Unsupported pyOpticfilm models: status alone is easy to miss.
+        if "cannot scan with pyOpticfilm" in text:
+            QMessageBox.warning(self, "Scan failed", text)
 
     @pyqtSlot(bool)
     def _on_ejected(self, triggered: bool) -> None:
