@@ -403,3 +403,23 @@ def test_unsupported_ae_af_forced_off_in_scan_params() -> None:
     _kind, req = controller.started[0]
     assert req.params.auto_exposure is False
     assert req.params.autofocus is False
+
+
+def test_scan_error_resets_ui_and_shows_status(monkeypatch) -> None:
+    sidebar, _ = _sidebar(SE_DEVICE)
+    sidebar.set_scanning(True)
+    sidebar.progress_bar.setVisible(True)
+    popped: list[tuple[str, str]] = []
+
+    def _fake_warning(parent, title, text, *args, **kwargs):
+        del parent, args, kwargs
+        popped.append((title, text))
+        return 0
+
+    monkeypatch.setattr("negpy.desktop.view.sidebar.scan.QMessageBox.warning", _fake_warning)
+    sidebar._on_scan_error("OpticFilm 8100 cannot scan with pyOpticfilm")
+
+    assert sidebar._scanning is False
+    assert sidebar.progress_bar.isVisible() is False
+    assert "Error: OpticFilm 8100 cannot scan with pyOpticfilm" in sidebar.status_label.text()
+    assert popped == [("Scan failed", "OpticFilm 8100 cannot scan with pyOpticfilm")]

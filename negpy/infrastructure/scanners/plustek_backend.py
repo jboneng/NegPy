@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import sys
 import threading
 from collections.abc import Callable
 from contextlib import suppress
@@ -252,10 +253,13 @@ class PlustekBackend:
         cancel: threading.Event,
     ) -> ScanResult:
         if not model_is_scan_ready(scanner.model):
-            raise RuntimeError(
-                f"{scanner.model.model} ({scanner.model.asic}) is locked out in "
-                "this release: only OpticFilm 8200i SE is validated for scanning."
+            msg = (
+                f"{scanner.model.model} ({scanner.model.asic}) cannot scan with "
+                "pyOpticfilm in this release — only OpticFilm 8200i SE is validated."
             )
+            if sys.platform != "win32":
+                msg += " Try Backend → SANE if that backend lists this scanner."
+            raise RuntimeError(msg)
         _validate_params(params, model=scanner.model)
         dpi = int(params.dpi)
         capture_ir = bool(params.capture_ir)

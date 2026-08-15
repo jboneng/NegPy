@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -809,7 +810,9 @@ class ScanSidebar(QWidget):
     def _on_scan_error(self, msg: str) -> None:
         self.set_scanning(False)
         self.progress_bar.setVisible(False)
-        self.status_label.setText(f"Error: {msg}")
+        text = msg or "Unknown scan error"
+        self.status_label.setText(f"Error: {text}")
+        QMessageBox.warning(self, "Scan failed", text)
 
     @pyqtSlot(bool)
     def _on_ejected(self, triggered: bool) -> None:
