@@ -623,7 +623,9 @@ class ImageProcessor:
         """
         ctx_mgr, metadata = loader_factory.get_loader(file_path, linear_raw=linear_raw)
         with ctx_mgr as raw:
-            algo = get_best_demosaic_algorithm(raw)
+            # Fast half-size decode must use LINEAR, like PreviewManager; AHD/DHT on
+            # binned CFA data skews channel ratios (green cast on contact-sheet tiles).
+            algo = rawpy.DemosaicAlgorithm.LINEAR if fast else get_best_demosaic_algorithm(raw)
             user_wb = [1, 1, 1, 1] if linear_raw else (list(wb_override) if wb_override is not None else None)
             post_kw: Dict[str, Any] = {"half_size": True} if fast and _use_half_size_decode(raw, linear_raw) else {}
             rgb = raw.postprocess(
@@ -1183,14 +1185,18 @@ class ImageProcessor:
                 prefer_gpu = False
 
             if prefer_gpu and self.engine_gpu:
-                buffer, _ = self.engine_gpu.process(
+                tex_final, _ = self.engine_gpu.process_to_texture(
                     f32_buffer,
                     params,
                     scale_factor=scale_factor,
+                    render_size_ref=float(target_long_px),
                     readback_metrics=False,
+                    source_hash=source_hash,
+                    analysis_source_hash=source_hash,
                     cam_xyz=self._cam_xyz_by_path.get(file_path, (None, None))[0],
                     camera_wb=self._cam_xyz_by_path.get(file_path, (None, None))[1],
                 )
+                buffer = self.engine_gpu._readback_downsampled(tex_final)
             else:
                 buffer, _ = self.run_pipeline(
                     f32_buffer,

@@ -136,6 +136,36 @@ class TestRenderDisplayArraySize(unittest.TestCase):
         # Bounded end to end: the laid-out result never exceeds the tile size either.
         self.assertLessEqual(max(tile.shape[:2]), 600)
 
+    def test_gpu_tile_render_passes_source_identity(self):
+        """GPU contact-sheet tiles must key the engine per frame, like preview."""
+        if self.proc.engine_gpu is None:
+            self.skipTest("no GPU")
+        seen: list = []
+        real = self.proc.engine_gpu.process_to_texture
+
+        def spy(*a, **kw):
+            seen.append(kw)
+            return real(*a, **kw)
+
+        with patch.object(self.proc.engine_gpu, "process_to_texture", side_effect=spy):
+            tile = self._render(600, prefer_gpu=True)
+
+        self.assertIsNotNone(tile)
+        self.assertTrue(seen, "process_to_texture was never called")
+        self.assertEqual(seen[0].get("source_hash"), "hash-1")
+        self.assertEqual(seen[0].get("analysis_source_hash"), "hash-1")
+        self.assertEqual(seen[0].get("render_size_ref"), 600.0)
+
+    def test_cpu_and_gpu_tiles_match(self):
+        """Contact-sheet GPU and CPU paths must agree on the same proof tile."""
+        tile_cpu = self._render(600, prefer_gpu=False)
+        tile_gpu = self._render(600, prefer_gpu=True)
+        self.assertIsNotNone(tile_cpu)
+        self.assertIsNotNone(tile_gpu)
+        self.assertEqual(tile_cpu.shape, tile_gpu.shape)
+        diff = np.mean(np.abs(tile_cpu.astype(np.float32) - tile_gpu.astype(np.float32)))
+        self.assertLess(diff, 2.0, f"CPU/GPU tile mean delta {diff:.2f} exceeds tolerance")
+
 
 class TestContactSheetReportsDroppedTiles(unittest.TestCase):
     """A tile that fails to render must be surfaced, not silently omitted."""

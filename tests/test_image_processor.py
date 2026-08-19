@@ -1,4 +1,6 @@
 import numpy as np
+from unittest.mock import MagicMock
+
 from negpy.services.rendering.image_processor import ImageProcessor
 from negpy.domain.models import WorkspaceConfig
 from negpy.features.process.models import ProcessMode
@@ -94,6 +96,49 @@ def test_use_half_size_decode_rules(monkeypatch) -> None:
     monkeypatch.setattr(ip, "is_xtrans", lambda raw: False)
     wrapper = object.__new__(ip.NonStandardFileWrapper)
     assert not ip._use_half_size_decode(wrapper, linear_raw=False)
+
+
+def test_decode_sensor_rgb_fast_uses_linear_demosaic(monkeypatch) -> None:
+    """Contact-sheet fast decode must match PreviewManager: LINEAR + half_size."""
+    import rawpy
+
+    rgb_u16 = np.zeros((32, 24, 3), dtype=np.uint16)
+    raw = MagicMock()
+    raw.raw_type = rawpy.RawType.Flat
+    raw.raw_pattern = np.zeros((2, 2), dtype=np.uint8)
+    raw.postprocess = MagicMock(return_value=rgb_u16)
+
+    class _Ctx:
+        def __enter__(self) -> MagicMock:
+            return raw
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    service = ImageProcessor()
+    monkeypatch.setattr(
+        "negpy.services.rendering.image_processor.loader_factory.get_loader",
+        lambda path, linear_raw: (_Ctx(), {"orientation": 1}),
+    )
+    monkeypatch.setattr(
+        "negpy.services.rendering.image_processor.camera_xyz_matrix",
+        lambda r: None,
+    )
+    monkeypatch.setattr(
+        "negpy.services.rendering.image_processor.camera_wb_multipliers",
+        lambda r: None,
+    )
+
+    service._decode_sensor_rgb("/fake/frame.dng", linear_raw=False, fast=True)
+    _, kwargs = raw.postprocess.call_args
+    assert kwargs["demosaic_algorithm"] == rawpy.DemosaicAlgorithm.LINEAR
+    assert kwargs.get("half_size") is True
+
+    raw.postprocess.reset_mock()
+    service._decode_sensor_rgb("/fake/frame.dng", linear_raw=False, fast=False)
+    _, kwargs = raw.postprocess.call_args
+    assert kwargs["demosaic_algorithm"] == rawpy.DemosaicAlgorithm.AHD
+    assert kwargs.get("half_size") is not True
 
 
 def _fake_decode_recorder(calls):
