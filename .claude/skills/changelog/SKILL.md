@@ -40,11 +40,17 @@ review, not an automatic edit.
 
 4. **Drop housekeeping commits** — no changelog line for: README/badge edits, changelog typo fixes, merge/revert/"rogue file" cleanups, pure internal log-noise fixes, version bumps.
 
-5. **Check what's already documented** — the top `##` section may already hold a few entries. Merge into it; don't duplicate.
+5. **Drop fixes and tweaks to a feature added in the same range** — a bug that
+   never reached a build is not news. Fold anything the user should know into
+   the feature's own `New:` bullet and write no `Fix:` line. Check every `Fix:`
+   candidate against the range's `New:` bullets before keeping it, and check
+   the entries already in the section too, not only the new commits.
 
-6. **Write one bullet per remaining commit** in the house style (below), grouped New → Change → Fix.
+6. **Check what's already documented** — the top `##` section may already hold a few entries. Merge into it; don't duplicate.
 
-7. **Show the draft in the reply.** On approval, insert into `docs/CHANGELOG.md` under the target `## X.X.X` heading (create it if absent), merged with any entries already there.
+7. **Write one bullet per remaining commit** in the house style (below), grouped New → Change → Fix.
+
+8. **Show the draft in the reply.** On approval, insert into `docs/CHANGELOG.md` under the target `## X.X.X` heading (create it if absent), merged with any entries already there.
 
 ## House style
 

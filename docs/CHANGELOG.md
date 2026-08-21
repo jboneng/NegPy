@@ -1,7 +1,5 @@
 # Change Log
 
-## Unreleased
-
 ## 0.53.0
 
 - New: **Capture date and place** — a Metadata panel card for when and where a frame was shot, with a map picker; searchable as `shot:` and `place:`.
@@ -22,7 +20,6 @@
 - Fix: **Metadata is carried into every export format** — JPEG XL and WebP previously dropped every field; punctuation NegPy writes now survives EXIF's 7-bit limit, and a JPEG XL source's own metadata is read correctly. @Icodextrin
 - Fix: **Linear Output's triplet merge is clamped before it can overshoot** — ringing from the alignment warp could push values past 1.0 uncaught in the float32 decode path.
 - Fix: **Linux app icon resolves correctly** — follows the AppImage icon-theme spec, and fixes the taskbar icon under Wayland compositors. @kinnajowa
-- Fix: **The capture-location map is usable on a trackpad, and Enter searches instead of closing the picker.** @seanharding
 - Fix: **EXIF parsing no longer runs inside a `finally` block** — a malformed block silently returned empty metadata instead of surfacing the real error. @MohammedAlkindi
 - Fix: **IR TIFF sidecar description no longer carries the source filename.** @MohammedAlkindi
 
