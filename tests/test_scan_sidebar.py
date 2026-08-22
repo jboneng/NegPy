@@ -78,7 +78,7 @@ SE_CAPS = ScannerCapabilities(
     max_area_mm=(36.33, 25.0),
     prescan=True,
     prescan_dpi=1200,
-    prescan_mirror_x=True,
+    multi_exposure=True,
     prescan_default_crop=(0.0, 0.35, 1.0, 0.65),
 )
 SE_DEVICE = ScannerDevice(
@@ -200,7 +200,14 @@ def test_se_device_shows_prescan() -> None:
     assert sidebar.prescan_widget.isVisibleTo(sidebar) is True
     assert sidebar.prescan_label.isVisibleTo(sidebar) is True
     assert sidebar.ir_check.isEnabled() is True
+    assert sidebar.me_check.isEnabled() is True
     assert sidebar.frame_range_widget.isVisibleTo(sidebar) is False
+
+
+def test_minimal_device_disables_multi_exposure() -> None:
+    sidebar, _ = _sidebar(MINIMAL_DEVICE)
+    assert sidebar.me_check.isEnabled() is False
+    assert sidebar.me_check.isChecked() is False
 
 
 def test_scan_params_include_prescan_crop() -> None:
