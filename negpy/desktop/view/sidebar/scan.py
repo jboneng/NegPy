@@ -565,20 +565,21 @@ class ScanSidebar(QWidget):
             self.frame_from_spin.setValue(frm)
             self.frame_to_spin.setValue(to)
 
-        # Scan window: a strip/roll feeder previews per-frame windows (StripPreviewDialog);
-        # any other device still gets one quick low-res preview of its single holder
-        # position to set one crop window (QuickScanPreviewDialog).
-        self.scan_window_row_label.setVisible(True)
-        self.scan_window_widget.setVisible(True)
-        self.scan_window_status.setVisible(True)
-        self.scan_window_row_label.setText("Batch" if has_frames else "Window")
-        if has_frames:
-            self.scan_window_btn.setText("Preview strip…")
-            self.scan_window_btn.setToolTip("Preview each frame, set a window per frame, and pick which frames to scan")
-        else:
-            self.scan_window_btn.setText("Preview…")
-            self.scan_window_btn.setToolTip("Preview the current holder position and set a crop window for the scan")
-        self._update_scan_window_status()
+        # Scan window: SANE-only crop UI (strip feeder or QuickScanPreviewDialog).
+        # pyOpticfilm uses Prescan instead; both wrote the same scan_window setting.
+        use_sane_window = self._current_backend_id() != "plustek"
+        self.scan_window_row_label.setVisible(use_sane_window)
+        self.scan_window_widget.setVisible(use_sane_window)
+        self.scan_window_status.setVisible(use_sane_window)
+        if use_sane_window:
+            self.scan_window_row_label.setText("Batch" if has_frames else "Window")
+            if has_frames:
+                self.scan_window_btn.setText("Preview strip…")
+                self.scan_window_btn.setToolTip("Preview each frame, set a window per frame, and pick which frames to scan")
+            else:
+                self.scan_window_btn.setText("Preview…")
+                self.scan_window_btn.setToolTip("Preview the current holder position and set a crop window for the scan")
+            self._update_scan_window_status()
 
         show_prescan = bool(caps.prescan)
         self.prescan_label.setVisible(show_prescan)
