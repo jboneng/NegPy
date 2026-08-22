@@ -106,6 +106,9 @@ _JXL_COLOR = {
     ColorSpace.GREYSCALE.value: ("GRAY", None, "SRGB"),
 }
 
+# Pinned wb_override for a decode with no white-balance gain applied at all.
+_NEUTRAL_WB = (1.0, 1.0, 1.0, 1.0)
+
 
 def _resolve_armed_autocrop(
     img: np.ndarray, settings: WorkspaceConfig
@@ -737,14 +740,20 @@ class ImageProcessor:
 
         decoded: Dict[str, np.ndarray] = {}
         if is_triplet:
-            # libraw releases the GIL, so all three exposures decode concurrently.
+            # Each exposure is a single narrowband channel: only one raw channel carries real
+            # signal, and a WB gain applied to it corrects nothing, since there is no scene
+            # spanning the spectrum for it to describe. Unlike the bracket merge below, which
+            # pins every frame to one WB because they share one real scene white balance to
+            # agree on, a triplet has none to agree on even if every frame's gains matched.
             for label, path in (("green", rgbcfg.green_path), ("blue", rgbcfg.blue_path)):
                 if not os.path.exists(path):
                     raise FileNotFoundError(f"RGB-scan {label} exposure not found: {path}")
             siblings = [p for p in dict.fromkeys((rgbcfg.green_path, rgbcfg.blue_path)) if p != file_path]
             with ThreadPoolExecutor(max_workers=1 + len(siblings)) as pool:
-                primary_future = pool.submit(self._decode_sensor_rgb, file_path, linear_raw, fast=fast_decode, wb_override=wb_override)
-                decoded = dict(zip(siblings, pool.map(lambda p: self._decode_sensor_rgb(p, linear_raw)[0], siblings)))
+                primary_future = pool.submit(self._decode_sensor_rgb, file_path, linear_raw, fast=fast_decode, wb_override=_NEUTRAL_WB)
+                decoded = dict(
+                    zip(siblings, pool.map(lambda p: self._decode_sensor_rgb(p, linear_raw, wb_override=_NEUTRAL_WB)[0], siblings))
+                )
                 rgb, metadata = primary_future.result()
         else:
             rgb, metadata = self._decode_sensor_rgb(file_path, linear_raw, fast=fast_decode, wb_override=wb_override)
@@ -752,8 +761,12 @@ class ImageProcessor:
         # already in the working space, so "Same as Source" exports without converting.
         source_cs = str(metadata.get("color_space") or WORKING_COLOR_SPACE)
         # Memoized rather than returned: several callers unpack the 3-tuple positionally,
-        # and only the export render and the bracket solve need this.
-        self._cam_xyz_by_path[file_path] = (metadata.get("cam_xyz"), metadata.get("camera_wb"))
+        # and only the export render and the bracket solve need this. None for a triplet:
+        # its as-shot camera_wb is one narrowband exposure's gain, not a scene white balance
+        # the assembled frame has, so it must never reach the capture-matrix fold downstream
+        # (see camera_to_working_matrix) — not even the primary's alone, and not a value all
+        # three exposures happened to share.
+        self._cam_xyz_by_path[file_path] = (metadata.get("cam_xyz"), None if is_triplet else metadata.get("camera_wb"))
         ir_full = metadata.get("ir")
 
         if is_triplet:

@@ -407,7 +407,16 @@ class PreviewManager:
     ) -> Tuple[ImageBuffer, Dimensions, dict]:
         """Merge a narrowband R/G/B triplet into one linear preview: red channel from the
         red shot, green from green, blue from blue. The merged result is cached, so re-visiting
-        a triplet skips the green/blue decode and the phase-correlate align."""
+        a triplet skips the green/blue decode and the phase-correlate align.
+
+        Each exposure decodes neutral regardless of ``use_camera_wb``: only one raw channel
+        of a narrowband exposure carries real signal, so a WB gain applied to it corrects
+        nothing, there being no full-spectrum scene for it to describe. That is a sharper
+        claim than the bracket merge's own pin: a bracket's frames share one real scene white
+        balance to agree on, so pinning them to one frame's gain is the fix; a triplet has no
+        such value to agree on even if every exposure's own gain happened to match.
+        ``use_camera_wb`` still scopes the cache key, since callers pass it through
+        unconditionally alongside the other preview paths."""
         green_path, blue_path, align = rgbscan.green_path, rgbscan.blue_path, rgbscan.align
         merged_key = None
         token = rgbscan_token(rgbscan)
@@ -422,9 +431,9 @@ class PreviewManager:
             if hit is not None:
                 return hit  # cache hit — caller must not mutate this buffer
 
-        red_out, dims, meta = self.load_linear_preview(red_path, color_space, use_camera_wb, full_resolution, file_hash)
-        green_out, _, _ = self.load_linear_preview(green_path, color_space, use_camera_wb, full_resolution, None)
-        blue_out, _, _ = self.load_linear_preview(blue_path, color_space, use_camera_wb, full_resolution, None)
+        red_out, dims, meta = self.load_linear_preview(red_path, color_space, False, full_resolution, file_hash)
+        green_out, _, _ = self.load_linear_preview(green_path, color_space, False, full_resolution, None)
+        blue_out, _, _ = self.load_linear_preview(blue_path, color_space, False, full_resolution, None)
 
         red = np.asarray(red_out, dtype=np.float32)
 
@@ -436,6 +445,11 @@ class PreviewManager:
 
         merged = assemble_rgb(red, _match(green_out), _match(blue_out), align=align)
         out = ensure_image(merged)
+        # None, not the red exposure's own as-shot camera_wb: that gain describes one
+        # narrowband exposure, not a scene white balance the assembled triplet has, so it
+        # must never reach the capture-matrix fold downstream — not even the primary's alone.
+        meta = dict(meta)
+        meta["camera_wb"] = None
         if merged_key is not None:
             # A freshly assembled buffer: the cache and the caller alias it, read-only.
             self._cache.put(merged_key, out, dims, dict(meta))
