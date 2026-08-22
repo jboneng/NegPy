@@ -1,5 +1,18 @@
 # Change Log
 
+## 0.54.0
+
+- New: **Metadata presets** — save any set of metadata fields as a named preset and apply it from the Metadata panel; gear presets are replaced and convert automatically, and a preset's values are editable in the library. @Icodextrin
+- New: **Development process and scan setup libraries** — saved recipes (developer, dilution, push/pull, time, temperature) and scan setups sit beside cameras, lenses and film stocks; the new fields reach XMP, EXIF, the metadata preview, filename templates and search as `devtime:`, `temp:` and `dilution:`. @Icodextrin
+- New: **Preferences dialog** — app-wide settings in one place (⋯ menu, Ctrl+, or the macOS application menu), in three sections: Interface, Performance, and Session & Storage; nine `override.toml` keys gain a UI, and a key the file pins greys out its row and says so.
+- Change: **Narrowband capture modes renamed** — Narrowband Scanner, Trichrome and Single-Shot Narrowband replace "RGB Scan", "true RGB scan" and "Trichrome Calibration" across the UI and the docs. @thetalkingdrum
+- Change: **Modeless windows stay above the main window on macOS** — the export progress window, the crosstalk and exposure target editors and the Scanlight windows can no longer be buried. @seanharding
+- Fix: **Shortcut labels use the platform's own notation** — macOS menus, tooltips and shortcut lists show ⌘C rather than Ctrl+C, and a rebound action shows its own key instead of the default. @seanharding
+- Fix: **1:1 zoom no longer upscales the preview** — the layout pass stretched a preview decoded below the render size, so 100% was not one scan pixel per device pixel; cropped frames and a raised `preview_render_size` were worst hit. @seanharding
+- Fix: **Trichrome exposures decode at a neutral white balance** — three unrelated as-shot gains were tinting the assembled image; Linear RAW is now locked for a triplet, where it has no effect. @thetalkingdrum
+- Fix: **Camera white balance is never folded into a narrowband capture matrix** — Negative Peek, the CPU transparency-transfer stage and the GPU shader all follow the same rule. @thetalkingdrum
+- Fix: **Apply white balance greyed for Trichrome and Single-Shot Narrowband** — a narrowband capture has no broadband scene for as-shot gains to describe, so the Linear Output bake is inert. @thetalkingdrum
+
 ## 0.53.0
 
 - New: **Capture date and place** — a Metadata panel card for when and where a frame was shot, with a map picker; searchable as `shot:` and `place:`.
