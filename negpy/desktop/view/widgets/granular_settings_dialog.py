@@ -293,6 +293,19 @@ class GranularSettingsDialog(QDialog):
     def selected(self) -> list[SettingRow]:
         return [row for box, row, _edited, _line in self._checks if box.isChecked()]
 
+    def show_unchanged_settings(self, shown: bool = True) -> None:
+        """List the rows still at their default, so they can be ticked without hunting."""
+        self._show_unchanged.setChecked(shown)
+
+    def set_checked_rows(self, row_ids) -> None:
+        """Tick exactly these rows. A row sitting at its default is hidden until "show
+        unchanged", and _apply_visibility unticks hidden rows, so reveal them first."""
+        wanted = set(row_ids)
+        if any(row.id in wanted and not edited for _box, row, edited, _line in self._checks):
+            self._show_unchanged.setChecked(True)
+        for box, row, _edited, _line in self._checks:
+            box.setChecked(row.id in wanted)
+
     def selected_ids(self) -> list[str]:
         return [row.id for row in self.selected()]
 

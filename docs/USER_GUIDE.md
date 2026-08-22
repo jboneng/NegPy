@@ -137,11 +137,12 @@ Type a plain word and it matches the filename. Beyond that the box takes `field:
 |---|---|
 | `film:portra` | frames whose film stock contains "portra" |
 | `camera:"Nikon F3"` | quote anything with a space |
-| `iso:>=400` | numeric fields also take `>`, `>=`, `<`, `<=` (`iso`, `frame`, `push`) |
+| `iso:>=400` | numeric fields also take `>`, `>=`, `<`, `<=` (`iso`, `frame`, `push`, `devtime`, `temp`) |
 | `date:2024-03` · `date:>=2024` | by file date; a partial date is a prefix |
 | `shot:1998` · `shot:>=1998-07` | by capture date from the Metadata panel, not the file date |
 | `place:tokyo` | by capture city, state or country |
-| `roll:` `developer:` `lens:` `format:` `scanning:` | the rest of the Metadata panel |
+| `devtime:>=9` · `temp:20` | development time in minutes, and temperature in °C |
+| `roll:` `developer:` `dilution:` `lens:` `format:` `scanning:` | the rest of the Metadata panel |
 | `name:` `path:` `ext:tif` | file identity |
 | `keeper:` `rejected:` `edited:` | frames carrying that mark, or with a saved edit |
 | `-rejected:` `-film:velvia` | a leading `-` negates any term |
@@ -833,11 +834,16 @@ Every export format carries it: JPEG, TIFF, PNG, JPEG XL and WebP. A TIFF holds 
 *   **Protect original metadata**: copy the source file's EXIF/XMP to exports unchanged, adding nothing. When it is on, the fields below are ignored.
 *   **Sync custom metadata to all files in batch export**: batch and preset exports write this frame's capture, gear and process values to every file, instead of each file's own.
 
+**Metadata Presets** — a saved set of metadata values, stored in `~/NegPy/presets/metadata/`, separate from the edit presets on the Setup tab:
+
+*   **Preset** + **Load**: write the selected preset's fields onto this frame. Only the fields the preset stores change; everything else on the frame stays. Hover the field for a list of what a preset holds.
+*   **Manage…**: the library, with a page each for **Cameras**, **Lenses**, **Film Stocks**, **Process**, **Scanning** and **Presets**. A Process entry is a development recipe (developer, dilution, push/pull, time and temperature); a Scanning entry is a digitizing setup. On the Presets page, **+** stores the current frame's metadata under a name you pick, the **pen** renames a preset or changes which fields it stores, and **copy** and **trash** duplicate and delete. The fields a preset stores are then editable in place: swap its camera, lens, film stock, saved process or saved setup, or retype a developer, dilution, push, time, temperature, scanning note, roll or exposure — no frame needs to be open. Picking from the library refills everything read from it; typing over a filled value unlinks the pick. A stored capture date, place, description-field set or flag is shown but not editable here, being a per-frame decision. **Notes** is free text. Starter data seeds into `~/NegPy/gear/` on first launch.
+
+Gear travels as one unit — camera, lens, film stock, the film format and every other value read from them — so a loaded preset fills the dropdowns below and the exported EXIF with the same pick, and a preset for a 120 stock cannot leave the frame claiming 35mm. Picking a film stock sets the format either way, so set a frame format such as `6×7` after choosing the stock. The frame number is never stored in a preset.
+
 **Analog Gear** (searchable; type in any field to filter the library):
 
-*   **Preset**: a reusable camera, lens and film combination. **Clear** empties the gear selections.
-*   **Camera / Lens / Film stock**: pick from your library. Empty means not set.
-*   **Manage…**: edit cameras, lenses, film stocks and presets. Starter data seeds into `~/NegPy/gear/` on first launch.
+*   **Camera / Lens / Film stock**: pick from your library. Empty means not set. **Clear** empties all three.
 
 **Capture:**
 
@@ -846,13 +852,18 @@ Every export format carries it: JPEG, TIFF, PNG, JPEG XL and WebP. A TIFF holds 
 
 **Process:**
 
-*   **Format**: `35mm`, `120`, `4×5`, `8×10`, `110`, or `Other` with a free-text field.
-*   **Developer**: for example `D-76 1+1`.
+*   **Saved process**: pick a development recipe from the library to fill Developer, Dilution, Push / Pull, Time and Temperature. Typing over any of them unlinks it, so the picker never names a value that is gone.
+*   **Format**: `—` (not set), `35mm`, `120`, `4×5`, `8×10`, `110`, or `Other` with a free-text field.
+*   **Developer** and **Dilution**: the developer, for example `D-76`, and its working strength, for example `1+1`, `1+50` or `stock`. The two join in EXIF `ImageDescription` as `D-76 1+1`; the dilution also goes to XMP as `negpy:DevelopmentDilution`.
 *   **Push / Pull**: `Push +3` … `Normal` … `Pull -3`.
+*   **Time** and **Temp (°C)**: development time as `9:30` or plain minutes, and the temperature it ran at. An unreadable time turns the field red and is not saved. Both are written to XMP as `negpy:DevelopmentTime` and `negpy:DevelopmentTemperature`, and searchable as `devtime:` (minutes) and `temp:`.
+*   **Clear**: empties the saved process and everything it fills — developer, dilution, push/pull, time and temperature. Format stays, since the film stock sets it.
 
 **Scanning:**
 
+*   **Saved setup**: pick a digitizing setup from the library to fill Scanning. Typing over it unlinks it.
 *   **Scanning**: scan method or notes. EXIF `Software` is always `NegPy`.
+*   **Clear**: empties the saved setup and the scanning note. Roll and Frame stay, since the scan stamps them rather than the setup.
 *   **Roll / Frame**: Scanlight capture roll name and frame number, stamped automatically on capture and editable here. Available in export filename templates as `{{ roll }}` and `{{ frame }}`, and written to XMP as `negpy:CaptureRoll` and `negpy:CaptureFrame` when set. Not the Roll Analysis normalization name.
 
 **Exposure**: optional original shutter, aperture and ISO. Click the lock to edit a free-text string, for example `1/125s f/2.8 ISO 400`.

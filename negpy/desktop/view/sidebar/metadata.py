@@ -14,8 +14,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from negpy.desktop.settings_catalog import (
+    apply_selected_fields,
+    preset_config,
+    preset_values,
+    rows_for_keys,
+)
+from negpy.desktop.view.shortcut_registry import tooltip_with_shortcut
 from negpy.desktop.view.sidebar.base import BaseSidebar
-from negpy.desktop.view.styles.templates import field_label, hint_label
+from negpy.desktop.view.styles.templates import field_label, hint_label, wrap_tooltip
 from negpy.desktop.view.styles.fonts import mono_font_family
 from negpy.desktop.view.styles.theme import THEME
 from negpy.desktop.view.widgets.collapsible import CollapsibleSection
@@ -25,20 +32,43 @@ from negpy.desktop.view.widgets.location_picker_dialog import LocationPickerDial
 from negpy.desktop.view.widgets.searchable_gear_combo import SearchableGearCombo
 from negpy.features.metadata.capture import (
     CAPTURE_DATE_HINT,
+    DEV_TIME_HINT,
+    format_dev_time,
+    format_temperature,
     parse_capture_date,
     parse_coords,
+    parse_dev_time,
+    parse_temperature,
     place_summary,
 )
 from negpy.features.metadata.exif_read import extract_scan_from_exif
-from negpy.features.metadata.gear_logic import metadata_from_gear
+from negpy.features.metadata.gear_logic import metadata_from_gear, metadata_from_process, metadata_from_scan_setup
 from negpy.features.metadata.gear_models import GearLibrary
-from negpy.features.metadata.models import DEFAULT_DESCRIPTION_FIELDS
+from negpy.features.metadata.models import (
+    DEFAULT_DESCRIPTION_FIELDS,
+    FORMAT_OPTIONS,
+    PROCESS_FIELDS,
+    PUSH_PULL_LABELS,
+    PUSH_PULL_VALUES,
+    SCANNING_FIELDS,
+    MetadataConfig,
+    format_label,
+    format_value,
+)
 from negpy.features.metadata.payload import build_metadata_payload
 from negpy.services.assets.gear import GearProfiles
+from negpy.services.assets.presets import MetadataPresets
 
-FORMAT_OPTIONS = ["35mm", "120", "4×5", "8×10", "110", "Other"]
-PUSH_PULL_OPTIONS = ["Push +3", "Push +2", "Push +1", "Normal", "Pull -1", "Pull -2", "Pull -3"]
-PUSH_PULL_VALUES = [3, 2, 1, 0, -1, -2, -3]
+PUSH_PULL_OPTIONS = [PUSH_PULL_LABELS[v] for v in PUSH_PULL_VALUES]
+_LOAD_TOOLTIP = "Write the selected preset's fields onto this frame"
+_CLEAR_TOOLTIPS = {
+    "gear_clear_btn": ("Clear the camera, lens and film stock selections", "metadata_clear_gear"),
+    "process_clear_btn": (
+        "Clear the saved process and the developer, dilution, push, time and temperature it fills",
+        "metadata_clear_process",
+    ),
+    "scan_clear_btn": ("Clear the saved scan setup and its scanning note", "metadata_clear_scanning"),
+}
 
 
 class MetadataSidebar(BaseSidebar):
@@ -84,20 +114,27 @@ class MetadataSidebar(BaseSidebar):
         controls.setContentsMargins(0, 0, 0, 0)
         controls.setSpacing(THEME.space_lg)
 
+        # ── METADATA PRESETS ─────────────────────────────────────────────
+        preset_body, presets = self._card_body()
+        load_row = QHBoxLayout()
+        load_row.setSpacing(THEME.space_sm)
+        self.metadata_preset_combo = SearchableGearCombo(placeholder="Search metadata presets…")
+        self.metadata_preset_combo.setToolTip("A saved set of metadata values. Click and type to search.")
+        load_row.addWidget(self.metadata_preset_combo, 1)
+        self.metadata_preset_load_btn = QPushButton("Load")
+        load_row.addWidget(self.metadata_preset_load_btn)
+        presets.addLayout(load_row)
+
+        self.manage_btn = QPushButton(" Manage…")
+        self.manage_btn.setIcon(qta.icon("fa5s.cog", color=THEME.text_primary))
+        self.manage_btn.setToolTip("Save, edit and delete metadata presets, cameras, lenses and film stocks")
+        presets.addWidget(self.manage_btn)
+        self._refresh_metadata_presets()
+        controls.addWidget(self._card("Metadata Presets", "presets", preset_body, "fa5s.magic"))
+
         # ── ANALOG GEAR ──────────────────────────────────────────────────
         gear_body, gear = self._card_body()
         gear.addWidget(hint_label("Type in any field to search the gear library."))
-
-        preset_row = QHBoxLayout()
-        preset_row.setSpacing(THEME.space_sm)
-        gear.addWidget(field_label("Preset"))
-        self.preset_combo = SearchableGearCombo(placeholder="Search presets…")
-        self.preset_combo.setToolTip("Reusable camera + lens + film combination. Click and type to search.")
-        preset_row.addWidget(self.preset_combo, 1)
-        self.preset_clear_btn = QPushButton("Clear")
-        self.preset_clear_btn.setToolTip("Clear gear preset selection")
-        preset_row.addWidget(self.preset_clear_btn)
-        gear.addLayout(preset_row)
 
         gear.addWidget(field_label("Camera"))
         self.camera_combo = SearchableGearCombo(placeholder="Search cameras…")
@@ -114,10 +151,9 @@ class MetadataSidebar(BaseSidebar):
         self.film_stock_combo.setToolTip("Film stock used for the original capture. Click and type to search.")
         gear.addWidget(self.film_stock_combo)
 
-        self.manage_btn = QPushButton(" Manage…")
-        self.manage_btn.setIcon(qta.icon("fa5s.cog", color=THEME.text_primary))
-        self.manage_btn.setToolTip("Edit cameras, lenses, film stocks, and gear presets")
-        gear.addWidget(self.manage_btn)
+        self.gear_clear_btn = QPushButton("Clear")
+
+        gear.addWidget(self.gear_clear_btn)
         controls.addWidget(self._card("Analog Gear", "gear", gear_body, "fa5s.camera-retro"))
 
         # ── CAPTURE ──────────────────────────────────────────────────────
@@ -148,11 +184,15 @@ class MetadataSidebar(BaseSidebar):
 
         # ── PROCESS ──────────────────────────────────────────────────────
         proc_body, proc = self._card_body()
+        proc.addWidget(field_label("Saved process"))
+        self.process_combo = SearchableGearCombo(placeholder="Search processes…")
+        self.process_combo.setToolTip("A saved development recipe. Picking one fills Developer and Push / Pull.")
+        proc.addWidget(self.process_combo)
+
         proc.addWidget(field_label("Format"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(FORMAT_OPTIONS)
-        if conf.format in FORMAT_OPTIONS:
-            self.format_combo.setCurrentText(conf.format)
+        self.format_combo.setCurrentText(format_label(conf.format))
         proc.addWidget(self.format_combo)
 
         self.format_other_edit = QLineEdit()
@@ -161,11 +201,26 @@ class MetadataSidebar(BaseSidebar):
         self.format_other_edit.setVisible(conf.format == "Other")
         proc.addWidget(self.format_other_edit)
 
-        proc.addWidget(field_label("Developer"))
+        dev_name_row = QHBoxLayout()
+        dev_name_row.setSpacing(THEME.space_sm)
+        developer_col = QVBoxLayout()
+        developer_col.setSpacing(THEME.space_md)
+        developer_col.addWidget(field_label("Developer"))
         self.developer_edit = QLineEdit()
-        self.developer_edit.setPlaceholderText("e.g. D-76 1+1")
+        self.developer_edit.setPlaceholderText("e.g. D-76")
         self.developer_edit.setText(conf.developer)
-        proc.addWidget(self.developer_edit)
+        developer_col.addWidget(self.developer_edit)
+        dilution_col = QVBoxLayout()
+        dilution_col.setSpacing(THEME.space_md)
+        dilution_col.addWidget(field_label("Dilution"))
+        self.dilution_edit = QLineEdit()
+        self.dilution_edit.setPlaceholderText("e.g. 1+50")
+        self.dilution_edit.setText(conf.process_dilution)
+        self.dilution_edit.setToolTip("Working strength, for example 1+1, 1+50 or stock.")
+        dilution_col.addWidget(self.dilution_edit)
+        dev_name_row.addLayout(developer_col, 2)
+        dev_name_row.addLayout(dilution_col, 1)
+        proc.addLayout(dev_name_row)
 
         proc.addWidget(field_label("Push / Pull"))
         self.push_pull_combo = QComboBox()
@@ -173,10 +228,39 @@ class MetadataSidebar(BaseSidebar):
         idx = PUSH_PULL_VALUES.index(conf.push_pull) if conf.push_pull in PUSH_PULL_VALUES else 3
         self.push_pull_combo.setCurrentIndex(idx)
         proc.addWidget(self.push_pull_combo)
+
+        dev_row = QHBoxLayout()
+        dev_row.setSpacing(THEME.space_sm)
+        time_col = QVBoxLayout()
+        time_col.setSpacing(THEME.space_md)
+        time_col.addWidget(field_label("Time"))
+        self.dev_time_edit = QLineEdit()
+        self.dev_time_edit.setPlaceholderText(DEV_TIME_HINT)
+        self.dev_time_edit.setText(format_dev_time(conf.process_time_seconds))
+        self.dev_time_edit.setToolTip("Development time, as mm:ss or plain minutes.")
+        time_col.addWidget(self.dev_time_edit)
+        temp_col = QVBoxLayout()
+        temp_col.setSpacing(THEME.space_md)
+        temp_col.addWidget(field_label("Temp (°C)"))
+        self.dev_temp_edit = QLineEdit()
+        self.dev_temp_edit.setPlaceholderText("e.g. 20")
+        self.dev_temp_edit.setText(format_temperature(conf.process_temperature_c))
+        temp_col.addWidget(self.dev_temp_edit)
+        dev_row.addLayout(time_col, 1)
+        dev_row.addLayout(temp_col, 1)
+        proc.addLayout(dev_row)
+
+        self.process_clear_btn = QPushButton("Clear")
+        proc.addWidget(self.process_clear_btn)
         controls.addWidget(self._card("Process", "process", proc_body, "fa5s.flask"))
 
         # ── SCANNING ─────────────────────────────────────────────────────
         scan_body, scan = self._card_body()
+        scan.addWidget(field_label("Saved setup"))
+        self.scan_setup_combo = SearchableGearCombo(placeholder="Search scan setups…")
+        self.scan_setup_combo.setToolTip("A saved digitizing setup. Picking one fills Scanning.")
+        scan.addWidget(self.scan_setup_combo)
+
         scan.addWidget(field_label("Scanning"))
         self.scanning_edit = QLineEdit()
         self.scanning_edit.setPlaceholderText("e.g. DSLR copy-stand scan")
@@ -206,6 +290,8 @@ class MetadataSidebar(BaseSidebar):
         roll_row.addLayout(frame_col, 1)
         scan.addLayout(roll_row)
 
+        self.scan_clear_btn = QPushButton("Clear")
+        scan.addWidget(self.scan_clear_btn)
         controls.addWidget(self._card("Scanning", "scanning", scan_body, "mdi6.scanner"))
 
         # ── EXPOSURE ─────────────────────────────────────────────────────
@@ -248,6 +334,8 @@ class MetadataSidebar(BaseSidebar):
         self.preview_section.set_content(self.preview_content)
         self.layout.addWidget(self.preview_section)
 
+        # After every card: the tooltips it fills in span all of them.
+        self.apply_shortcut_tooltips()
         self._set_metadata_controls_enabled(not conf.protect_original_metadata)
 
     def _card_body(self) -> tuple[QWidget, QVBoxLayout]:
@@ -319,12 +407,16 @@ class MetadataSidebar(BaseSidebar):
     def _connect_signals(self) -> None:
         self.protect_check.toggled.connect(self._on_protect_toggled)
         self.description_fields_btn.clicked.connect(self._open_description_fields)
-        self.preset_combo.selection_changed.connect(self._on_preset_changed)
-        self.preset_clear_btn.clicked.connect(self._on_preset_clear)
+        self.gear_clear_btn.clicked.connect(self._on_gear_clear)
+        self.process_clear_btn.clicked.connect(self._on_process_clear)
+        self.scan_clear_btn.clicked.connect(self._on_scanning_clear)
         self.camera_combo.selection_changed.connect(self._on_gear_changed)
         self.lens_combo.selection_changed.connect(self._on_gear_changed)
         self.film_stock_combo.selection_changed.connect(self._on_gear_changed)
         self.manage_btn.clicked.connect(self._open_gear_library)
+
+        self.metadata_preset_combo.selection_changed.connect(self._update_metadata_preset_tooltip)
+        self.metadata_preset_load_btn.clicked.connect(self._on_metadata_preset_load)
 
         self.capture_date_edit.textChanged.connect(self._on_capture_date_changed)
         self.place_edit.editingFinished.connect(self._on_place_edited)
@@ -333,9 +425,14 @@ class MetadataSidebar(BaseSidebar):
 
         self.format_combo.currentTextChanged.connect(self._on_format_changed)
         self.format_other_edit.textChanged.connect(self._mark_dirty)
-        self.developer_edit.textChanged.connect(self._mark_dirty)
-        self.push_pull_combo.currentIndexChanged.connect(self._mark_dirty)
-        self.scanning_edit.textChanged.connect(self._mark_dirty)
+        self.process_combo.selection_changed.connect(self._on_process_selected)
+        self.scan_setup_combo.selection_changed.connect(self._on_scan_setup_selected)
+        self.developer_edit.textChanged.connect(self._on_process_edited)
+        self.dilution_edit.textChanged.connect(self._on_process_edited)
+        self.push_pull_combo.currentIndexChanged.connect(self._on_process_edited)
+        self.dev_time_edit.textChanged.connect(self._on_dev_time_changed)
+        self.dev_temp_edit.textChanged.connect(self._on_dev_temp_changed)
+        self.scanning_edit.textChanged.connect(self._on_scanning_edited)
         self.capture_roll_edit.textChanged.connect(self._mark_dirty)
         self.capture_frame_edit.textChanged.connect(self._mark_dirty)
         self.sync_check.toggled.connect(self._mark_dirty)
@@ -382,16 +479,6 @@ class MetadataSidebar(BaseSidebar):
         def should_refresh(combo: SearchableGearCombo) -> bool:
             return force or not combo.is_editing()
 
-        if should_refresh(self.preset_combo):
-            self.preset_combo.blockSignals(True)
-            self.preset_combo.set_gear_items(
-                library.gear_presets,
-                conf.gear_preset_id or "",
-                lambda p: p.display_name or "Unnamed preset",
-                library,
-            )
-            self.preset_combo.blockSignals(False)
-
         if should_refresh(self.camera_combo):
             self.camera_combo.set_gear_items(
                 library.cameras,
@@ -413,22 +500,73 @@ class MetadataSidebar(BaseSidebar):
                 lambda stock: stock.resolved_display_name,
             )
 
-    def _on_preset_changed(self, _preset_id: str = "") -> None:
-        preset_id = self.preset_combo.selected_id()
-        if not preset_id:
-            return
-        self._dirty = False
-        new_meta = metadata_from_gear(
-            self.state.config.metadata,
-            self._gear_library,
-            gear_preset_id=preset_id,
-        )
-        self._apply_metadata_config(new_meta)
+        if should_refresh(self.process_combo):
+            self.process_combo.set_gear_items(
+                library.processes,
+                conf.process_id or "",
+                lambda process: process.resolved_display_name,
+            )
 
-    def _on_preset_clear(self) -> None:
+        if should_refresh(self.scan_setup_combo):
+            self.scan_setup_combo.set_gear_items(
+                library.scan_setups,
+                conf.scanning_id or "",
+                lambda setup: setup.resolved_display_name,
+            )
+
+    def _on_process_selected(self, *_args) -> None:
+        self._dirty = False
+        self._apply_metadata_config(metadata_from_process(self.state.config.metadata, self._gear_library, self.process_combo.selected_id()))
+
+    def _on_scan_setup_selected(self, *_args) -> None:
+        self._dirty = False
+        self._apply_metadata_config(
+            metadata_from_scan_setup(self.state.config.metadata, self._gear_library, self.scan_setup_combo.selected_id())
+        )
+
+    def _on_dev_time_changed(self, text: str) -> None:
+        self._flag_invalid(self.dev_time_edit, bool(text.strip()) and parse_dev_time(text) is None)
+        self._on_process_edited()
+
+    def _on_dev_temp_changed(self, text: str) -> None:
+        self._flag_invalid(self.dev_temp_edit, bool(text.strip()) and parse_temperature(text) is None)
+        self._on_process_edited()
+
+    def _flag_invalid(self, edit: QLineEdit, invalid: bool) -> None:
+        edit.setStyleSheet(f"border: 1px solid {THEME.accent_secondary};" if invalid else "")
+
+    def _dev_time_value(self) -> Optional[int]:
+        """Unreadable text keeps what is stored; blank clears. Same rule as Capture Date."""
+        text = self.dev_time_edit.text().strip()
+        if not text:
+            return None
+        parsed = parse_dev_time(text)
+        return self.state.config.metadata.process_time_seconds if parsed is None else parsed
+
+    def _dev_temp_value(self) -> Optional[float]:
+        text = self.dev_temp_edit.text().strip()
+        if not text:
+            return None
+        parsed = parse_temperature(text)
+        return self.state.config.metadata.process_temperature_c if parsed is None else parsed
+
+    def _on_process_edited(self, *_args) -> None:
+        """Typing over a saved value unlinks it, so the picker never names a value that is gone."""
+        self._clear_combo(self.process_combo)
+        self._mark_dirty()
+
+    def _on_scanning_edited(self, *_args) -> None:
+        self._clear_combo(self.scan_setup_combo)
+        self._mark_dirty()
+
+    def _clear_combo(self, combo: SearchableGearCombo) -> None:
+        combo.blockSignals(True)
+        combo.set_selected_id("")
+        combo.blockSignals(False)
+
+    def _on_gear_clear(self) -> None:
         cleared = replace(
             self.state.config.metadata,
-            gear_preset_id="",
             camera_id="",
             lens_id="",
             film_stock_id="",
@@ -445,17 +583,25 @@ class MetadataSidebar(BaseSidebar):
         )
         self._apply_metadata_config(cleared)
 
+    def _clear_fields(self, fields: tuple[str, ...]) -> None:
+        defaults = MetadataConfig()
+        self._dirty = False
+        self._apply_metadata_config(replace(self.state.config.metadata, **{f: getattr(defaults, f) for f in fields}))
+
+    def _on_process_clear(self) -> None:
+        self._clear_fields(PROCESS_FIELDS)
+
+    def _on_scanning_clear(self) -> None:
+        self._clear_fields(SCANNING_FIELDS)
+
     def _on_gear_changed(self, *_args) -> None:
         sender = self.sender()
         kwargs: dict = {}
         if sender is self.camera_combo:
-            kwargs["gear_preset_id"] = ""
             kwargs["camera_id"] = self.camera_combo.selected_id()
         elif sender is self.lens_combo:
-            kwargs["gear_preset_id"] = ""
             kwargs["lens_id"] = self.lens_combo.selected_id()
         elif sender is self.film_stock_combo:
-            kwargs["gear_preset_id"] = ""
             kwargs["film_stock_id"] = self.film_stock_combo.selected_id()
         else:
             return
@@ -465,9 +611,6 @@ class MetadataSidebar(BaseSidebar):
             self._gear_library,
             **kwargs,
         )
-        self.preset_combo.blockSignals(True)
-        self.preset_combo.set_selected_id("")
-        self.preset_combo.blockSignals(False)
         self._apply_metadata_config(new_meta, refresh_combos=False)
 
     def _apply_metadata_config(self, new_meta, *, refresh_combos: bool = True) -> None:
@@ -483,11 +626,47 @@ class MetadataSidebar(BaseSidebar):
         self.sync_ui()
         self._schedule_preview()
 
+    def apply_shortcut_tooltips(self) -> None:
+        """Re-read the binding: tooltips are built before saved overrides load, and again
+        whenever the shortcut editor writes a new one."""
+        self.metadata_preset_load_btn.setToolTip(tooltip_with_shortcut(_LOAD_TOOLTIP, "metadata_preset_load"))
+        for attr, (text, action_id) in _CLEAR_TOOLTIPS.items():
+            getattr(self, attr).setToolTip(tooltip_with_shortcut(text, action_id))
+
+    def _refresh_metadata_presets(self) -> None:
+        selected = self.metadata_preset_combo.selected_id()
+        names = sorted(MetadataPresets.list_presets())
+        self.metadata_preset_combo.set_labeled_items([(n, n) for n in names], selected if selected in names else "")
+        self._update_metadata_preset_tooltip()
+
+    def _update_metadata_preset_tooltip(self, *_args) -> None:
+        name = self.metadata_preset_combo.selected_id()
+        data = MetadataPresets.load_preset(name) if name else None
+        lines = "\n".join(f"{label}: {value}" for label, value in preset_values(data, "metadata")) if data else ""
+        self.metadata_preset_combo.setToolTip(wrap_tooltip(lines) if lines else "A saved set of metadata values. Click and type to search.")
+
+    def _on_metadata_preset_load(self) -> None:
+        name = self.metadata_preset_combo.selected_id()
+        data = MetadataPresets.load_preset(name) if name else None
+        if not data:
+            return
+        # The form may hold edits the debounce has not written yet; the preset wins over them.
+        self._dirty = False
+        rows = rows_for_keys(data, "metadata")
+        merged = apply_selected_fields(preset_config(data), self.state.config, rows)
+        self._apply_metadata_config(merged.metadata)
+
     def _open_gear_library(self) -> None:
-        dlg = GearLibraryDialog(self._gear_library, parent=self)
+        # The dialog holds the config it was given, so the debounce has to land first or a
+        # preset saved from "the current frame" misses the edit that is still pending.
+        self.update_timer.stop()
+        self._persist_all_metadata_settings()
+        dlg = GearLibraryDialog(self._gear_library, parent=self, current_config=self.state.config)
         dlg.library_changed.connect(self._on_library_changed)
+        dlg.presets_changed.connect(self._refresh_metadata_presets)
         if dlg.exec():
             self._on_library_changed()
+        self._refresh_metadata_presets()
 
     def _on_library_changed(self) -> None:
         self._gear_library = GearProfiles.load_library()
@@ -590,7 +769,7 @@ class MetadataSidebar(BaseSidebar):
             return
         self._dirty = False
 
-        fmt = self.format_combo.currentText()
+        fmt = format_value(self.format_combo.currentText())
         pp_idx = self.push_pull_combo.currentIndex()
 
         exposure_override = ""
@@ -615,14 +794,18 @@ class MetadataSidebar(BaseSidebar):
             render=False,
             readback_metrics=False,
             capture_date=capture_date,
-            gear_preset_id=self.preset_combo.selected_id(),
             camera_id=self.camera_combo.selected_id(),
             lens_id=self.lens_combo.selected_id(),
             film_stock_id=self.film_stock_combo.selected_id(),
             format=fmt,
             format_other=self.format_other_edit.text().strip() if fmt == "Other" else "",
+            process_id=self.process_combo.selected_id(),
             developer=self.developer_edit.text().strip(),
+            process_dilution=self.dilution_edit.text().strip(),
             push_pull=PUSH_PULL_VALUES[pp_idx] if 0 <= pp_idx < len(PUSH_PULL_VALUES) else 0,
+            process_time_seconds=self._dev_time_value(),
+            process_temperature_c=self._dev_temp_value(),
+            scanning_id=self.scan_setup_combo.selected_id(),
             scanning=self.scanning_edit.text().strip(),
             capture_roll=self.capture_roll_edit.text().strip(),
             capture_frame=capture_frame,
@@ -642,18 +825,20 @@ class MetadataSidebar(BaseSidebar):
             self._set_metadata_controls_enabled(not conf.protect_original_metadata)
             self._refresh_gear_combos()
 
-            if conf.format in FORMAT_OPTIONS:
-                self.format_combo.setCurrentText(conf.format)
-            else:
-                self.format_combo.setCurrentText("Other")
-                self.format_other_edit.setText(conf.format_other)
-            self.format_other_edit.setVisible(self.format_combo.currentText() == "Other")
+            self.format_combo.setCurrentText(format_label(conf.format))
+            self.format_other_edit.setText(conf.format_other)
+            self.format_other_edit.setVisible(conf.format == "Other")
             self.capture_date_edit.setText(conf.capture_date)
             self.capture_date_edit.setStyleSheet("")
             self.place_edit.setText(self._place_text())
             self.developer_edit.setText(conf.developer)
+            self.dilution_edit.setText(conf.process_dilution)
             idx = PUSH_PULL_VALUES.index(conf.push_pull) if conf.push_pull in PUSH_PULL_VALUES else 3
             self.push_pull_combo.setCurrentIndex(idx)
+            self.dev_time_edit.setText(format_dev_time(conf.process_time_seconds))
+            self.dev_temp_edit.setText(format_temperature(conf.process_temperature_c))
+            self._flag_invalid(self.dev_time_edit, False)
+            self._flag_invalid(self.dev_temp_edit, False)
             self.scanning_edit.setText(conf.scanning)
             self.capture_roll_edit.setText(conf.capture_roll)
             self.capture_frame_edit.setText("" if conf.capture_frame is None else str(conf.capture_frame))
@@ -704,7 +889,7 @@ class MetadataSidebar(BaseSidebar):
     def _preview_metadata_config(self):
         """MetadataConfig from the live form so preview tracks edits before debounce persist."""
         conf = self.state.config.metadata
-        fmt = self.format_combo.currentText()
+        fmt = format_value(self.format_combo.currentText())
         pp_idx = self.push_pull_combo.currentIndex()
         exposure_override = ""
         if not self._exif_locked.get("exposure", True):
@@ -717,14 +902,18 @@ class MetadataSidebar(BaseSidebar):
         return replace(
             conf,
             capture_date=parsed_date.xmp_text() if parsed_date else "",
-            gear_preset_id=self.preset_combo.selected_id(),
             camera_id=self.camera_combo.selected_id(),
             lens_id=self.lens_combo.selected_id(),
             film_stock_id=self.film_stock_combo.selected_id(),
             format=fmt,
             format_other=self.format_other_edit.text().strip() if fmt == "Other" else "",
+            process_id=self.process_combo.selected_id(),
             developer=self.developer_edit.text().strip(),
+            process_dilution=self.dilution_edit.text().strip(),
             push_pull=PUSH_PULL_VALUES[pp_idx] if 0 <= pp_idx < len(PUSH_PULL_VALUES) else 0,
+            process_time_seconds=self._dev_time_value(),
+            process_temperature_c=self._dev_temp_value(),
+            scanning_id=self.scan_setup_combo.selected_id(),
             scanning=self.scanning_edit.text().strip(),
             sync_to_batch=self.sync_check.isChecked(),
             exposure_override=exposure_override,
